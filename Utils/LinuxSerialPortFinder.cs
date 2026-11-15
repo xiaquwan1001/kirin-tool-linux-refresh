@@ -17,17 +17,56 @@ namespace Kirin_Tool.Utils
     /// </summary>
     public static class LinuxSerialPortFinder
     {
+        /// <summary>
+        /// K7: 候选端口按 USB 物理设备（最近的带 idVendor/idProduct 的 sysfs 祖先）归并后再选。
+        ///
+        /// 上游取「第一个 VID/PID 匹配的端口」，多台同型号设备同时插着时就是猜一台：把 loader
+        /// 打到别人机器上的风险和 2026-11-15 的 fastboot 事故同源。现在：
+        /// * 命中 1 台物理设备（哪怕它有 ttyUSB0..3 四个接口）→ 仍返回第一个端口，行为不变；
+        /// * 命中 &gt;1 台 → 抛 <see cref="AmbiguousSerialDeviceException"/>，要求显式 --port 或拔掉其它设备。
+        ///
+        /// <paramref name="ttyClassRoot"/>/<paramref name="ports"/> 只用于离线测试（假 sysfs 树）。
+        /// </summary>
         public static string? FindPort(int vendorId, int? productId = null, Func<string, bool>? descriptorMatches = null,
-            Func<DirectoryInfo, bool>? interfaceMatches = null)
+            Func<DirectoryInfo, bool>? interfaceMatches = null, string ttyClassRoot = "/sys/class/tty",
+            IEnumerable<string>? ports = null)
         {
-            if (!OperatingSystem.IsLinux())
+            IReadOnlyList<(string Port, string UsbDevice)> candidates =
+                MatchingPorts(vendorId, productId, descriptorMatches, interfaceMatches, ttyClassRoot, ports);
+
+            // One physical device, several ttys (the option driver exposes 4 interfaces): same as before.
+            var devices = candidates.Select(candidate => candidate.UsbDevice)
+                .Distinct(StringComparer.Ordinal).ToList();
+            if (devices.Count > 1)
             {
-                return null;
+                string inventory = string.Join(", ", candidates
+                    .GroupBy(candidate => candidate.UsbDevice, StringComparer.Ordinal)
+                    .Select(group => group.Key + " (" + string.Join("/", group.Select(candidate => Path.GetFileName(candidate.Port))) + ")"));
+                throw new AmbiguousSerialDeviceException(
+                    devices.Count + " devices with VID " + vendorId.ToString("X4")
+                    + (productId.HasValue ? "/PID " + productId.Value.ToString("X4") : string.Empty)
+                    + " are plugged in: " + inventory
+                    + ". Refusing to pick one automatically; specify the port explicitly (--port) or unplug the other device(s).");
             }
 
-            foreach (string port in SerialPort.GetPortNames().OrderBy(port => port, StringComparer.Ordinal))
+            return candidates.Count == 0 ? null : candidates[0].Port;
+        }
+
+        /// <summary>All ports matching the identity/filters, each tagged with its physical USB device.</summary>
+        private static IReadOnlyList<(string Port, string UsbDevice)> MatchingPorts(int vendorId, int? productId,
+            Func<string, bool>? descriptorMatches, Func<DirectoryInfo, bool>? interfaceMatches,
+            string ttyClassRoot, IEnumerable<string>? ports)
+        {
+            var candidates = new List<(string Port, string UsbDevice)>();
+            if (!OperatingSystem.IsLinux())
             {
-                if (!IsUsbSerialPort(port) || !TryGetUsbDevice(port, out DirectoryInfo? usbDevice, out DirectoryInfo? serialDevice))
+                return candidates;
+            }
+
+            foreach (string port in (ports ?? SerialPort.GetPortNames()).OrderBy(port => port, StringComparer.Ordinal))
+            {
+                if (!IsUsbSerialPort(port) ||
+                    !TryGetUsbDevice(port, out DirectoryInfo? usbDevice, out DirectoryInfo? serialDevice, ttyClassRoot))
                 {
                     continue;
                 }
@@ -44,11 +83,11 @@ namespace Kirin_Tool.Utils
                     (descriptorMatches?.Invoke(descriptor) ?? false) ||
                     (interfaceMatches?.Invoke(serialDevice!) ?? false))
                 {
-                    return port;
+                    candidates.Add((port, usbDevice!.FullName));
                 }
             }
 
-            return null;
+            return candidates;
         }
 
         /// <summary>
@@ -77,9 +116,10 @@ namespace Kirin_Tool.Utils
                    port.StartsWith("/dev/ttyGS", StringComparison.Ordinal);
         }
 
-        private static bool TryGetUsbDevice(string port, out DirectoryInfo? usbDevice, out DirectoryInfo? serialDevice)
+        private static bool TryGetUsbDevice(string port, out DirectoryInfo? usbDevice, out DirectoryInfo? serialDevice,
+            string ttyClassRoot = "/sys/class/tty")
         {
-            serialDevice = ResolveSerialDevice(port);
+            serialDevice = ResolveSerialDevice(port, ttyClassRoot);
             for (DirectoryInfo? directory = serialDevice; directory != null; directory = directory.Parent)
             {
                 if (File.Exists(Path.Combine(directory.FullName, "idVendor")) &&
@@ -159,5 +199,15 @@ namespace Kirin_Tool.Utils
                 return null;
             }
         }
+    }
+
+    /// <summary>
+    /// K7: more than one physical USB device matches the VID/PID (or descriptor) filter. The caller
+    /// must not guess — the same rule the fastboot side enforces when <c>fastboot devices</c> shows
+    /// more than one serial (see <see cref="ProcessRunner"/>).
+    /// </summary>
+    public sealed class AmbiguousSerialDeviceException : IOException
+    {
+        public AmbiguousSerialDeviceException(string message) : base(message) { }
     }
 }

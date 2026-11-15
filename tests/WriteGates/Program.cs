@@ -180,6 +180,10 @@ if args[:1] == ["oem"] and len(args) > 1 and args[1].startswith("oeminfoerase-")
     answer("FAILED (remote: erase not allowed)", 1) if mode == "erase-fail" else answer("OKAY")
 if args[:1] == ["getvar"] and len(args) > 1:
     variable = args[1]
+    if variable == "product":
+        # K6 pre-write identity gate: a real loader answers '(bootloader) product: <model>'.
+        # 'bad-product' imitates the 2026-11-15 loader, which answered the probe with a bare OKAY.
+        answer("OKAY") if mode == "bad-product" else answer("(bootloader) product: ELS-AN00\nOKAY")
     if variable.startswith("nve:SN@"):
         if mode == "write-fail":
             answer("FAILED (remote: variable write not allowed)", 1)
@@ -313,6 +317,47 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         Check(doc.RootElement.GetProperty("verified").GetBoolean(), "write-sn verified: verified=true");
         Check(doc.RootElement.GetProperty("readBack").GetString() == "NEWSERIAL9", "write-sn verified: readBack equals the written value");
     }
+
+    // 6e. K6: the loader answers getvar product with a bare OKAY (the 2026-11-15 shape).
+    // Nothing may be written, and the failure must name the identity, not the command.
+    {
+        (int code, JsonDocument doc) = await RunWriteSn("bad-product", "NEWSERIAL9");
+        Check(code == 3, "write-sn with an unidentified device exits 3 (got " + code + ")");
+        Check(doc.RootElement.GetProperty("applied").GetBoolean() == false, "unidentified device: applied=false");
+        Check(doc.RootElement.GetProperty("gate").GetString() == "failed", "unidentified device: gate=failed");
+        Check(doc.RootElement.GetProperty("reason").GetString() == "device_identity_refused",
+            "unidentified device: reason token is device_identity_refused (got '" + doc.RootElement.GetProperty("reason").GetString() + "')");
+        Check(doc.RootElement.GetProperty("result").GetProperty("error").GetString()!.Contains("did not identify itself"),
+            "unidentified device: the detail says the device did not identify itself");
+    }
+}
+
+// ---------------------------------------------------------------- 6f. K6 pre-write identity gate (unit half)
+// The verdict is derived from the loader answer alone, so the rules are asserted without a process:
+// this is the unit-test half of the gate (the end-to-end half is 6e above).
+{
+    Kirin_Tool.Models.ProcessResult Answer(string output, int code = 0) => new() { ExitCode = code, Output = output };
+
+    var read = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("(bootloader) product: ELS-AN00\nOKAY"), null);
+    Check(read.Status == Kirin_Tool.Services.IdentityReading.Read && !read.Refused && read.LooksLikeKirinFamily,
+        "identity gate accepts a real Kirin 990 model");
+    var noh = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("(bootloader) product: NOH-AN00\nOKAY"), null);
+    Check(!noh.Refused && noh.LooksLikeKirinFamily, "identity gate accepts a Kirin 9000 model");
+    var other = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("product: SM-G991B\nOKAY"), null);
+    Check(!other.Refused && !other.LooksLikeKirinFamily,
+        "an unknown but plausible model is allowed (the gate is not a chip whitelist)");
+    var bareOkay = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("OKAY"), null);
+    Check(bareOkay.Refused && bareOkay.Status == Kirin_Tool.Services.IdentityReading.Invalid,
+        "a bare OKAY answer is not an identity: the write is refused (2026-11-15)");
+    var failedToken = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("product: FAILED (remote: 'unknown')"), null);
+    Check(failedToken.Refused, "a FAILED/unknown token as product is refused");
+    var failedProbe = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer("no device", 7), null);
+    Check(!failedProbe.Refused && failedProbe.Status == Kirin_Tool.Services.IdentityReading.Unreadable,
+        "a probe that could not run does not block the write");
+    var silent = Kirin_Tool.Services.DeviceIdentityGate.Evaluate(Answer(""), null);
+    Check(!silent.Refused, "an empty probe answer is unreadable, not a refusal");
+    Check(Kirin_Tool.Services.DeviceIdentityGate.ParseProduct("(bootloader) product: ANA-AN00\nOKAY") == "ANA-AN00",
+        "the product line is parsed with or without the (bootloader) prefix");
 }
 // ---------------------------------------------------------------- 7. D-13: downgrade-erase
 // Enable Downgrade used to erase four oeminfo version fields straight from the GUI with no approval
@@ -410,6 +455,93 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         }
         finally { ApprovalGates.ResetToFailClosed(); }
     }
+}
+
+// ---------------------------------------------------------------- 9. explicit -s <SN>
+// With a pinned serial the spawned command line itself must carry it: the environment variable alone
+// keeps fastboot from picking another phone, but the op log (argv) would not say which one was hit.
+{
+    string pinnedStub = Path.Combine(stubDir, "pinned-fastboot");
+    File.WriteAllText(pinnedStub, "#!/usr/bin/env python3\nimport sys, json\nprint(json.dumps(sys.argv[1:]))\n");
+    if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(pinnedStub, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+    string logRoot = Path.Combine(stubDir, "oplog");
+    Directory.CreateDirectory(logRoot);
+    string? oldLogRoot = Environment.GetEnvironmentVariable("KIRIN_LOG_DIR");
+    Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", logRoot);
+    Environment.SetEnvironmentVariable("KIRIN_SERIAL", "ELS0123456789");
+    try
+    {
+        var flash = await Kirin_Tool.Utils.ProcessRunner.RunAsync(pinnedStub, new[] { "flash", "boot", "/tmp/boot.img" }, op: "fastboot.flash");
+        string[] flashArgv = JsonSerializer.Deserialize<string[]>(flash.Output.Trim())!;
+        Check(flashArgv.SequenceEqual(new[] { "-s", "ELS0123456789", "flash", "boot", "/tmp/boot.img" }),
+            "a pinned serial is written on the command line (-s before the subcommand)");
+
+        var listing = await Kirin_Tool.Utils.ProcessRunner.RunAsync(pinnedStub, "devices", op: "fastboot.devices");
+        string[] listArgv = JsonSerializer.Deserialize<string[]>(listing.Output.Trim())!;
+        Check(listArgv.SequenceEqual(new[] { "devices" }), "device listing stays unpinned so every device is visible");
+
+        var derive = await Kirin_Tool.Utils.ProcessRunner.RunAsync(pinnedStub, new[] { "getvar", "product", "--quiet" });
+        string[] deriveArgv = JsonSerializer.Deserialize<string[]>(derive.Output.Trim())!;
+        Check(deriveArgv[0] == "-s" && deriveArgv.Contains("--quiet"), "the pinned serial and the caller's argv both reach the child");
+        var deriveOp = typeof(Kirin_Tool.Utils.ProcessRunner)
+            .GetMethod("DeriveOp", BindingFlags.NonPublic | BindingFlags.Static)!;
+        string opName = (string)deriveOp.Invoke(null, new object[] { "fastboot", new[] { "-s", "ELS0123456789", "getvar", "product" } })!;
+        Check(opName == "fastboot.getvar", "the op name still comes from the subcommand, never from the injected serial (got " + opName + ")");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("KIRIN_SERIAL", null);
+        Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", oldLogRoot);
+    }
+}
+
+// ---------------------------------------------------------------- 8. K7 VCOM port uniqueness
+// A fake sysfs tree (same technique as tests/StableParity) stands in for the kernel: one physical
+// device exposing four option interfaces must still count as ONE device, while two physical devices
+// must be refused instead of silently picking "the first port".
+{
+    string sys = Path.Combine(Path.GetTempPath(), "kirin-port-unique-" + Guid.NewGuid().ToString("N"));
+    string classTty = Path.Combine(sys, "class", "tty");
+    Directory.CreateDirectory(classTty);
+    string AddDevice(string usbName, params string[] ttys)
+    {
+        string usb = Path.Combine(sys, "devices", "usb", usbName);
+        Directory.CreateDirectory(usb);
+        File.WriteAllText(Path.Combine(usb, "idVendor"), "12d1");
+        File.WriteAllText(Path.Combine(usb, "idProduct"), "3609");
+        foreach (string tty in ttys)
+        {
+            string iface = Path.Combine(usb, usbName + ":1.0");
+            string ttyDir = Path.Combine(iface, "tty", tty);
+            Directory.CreateDirectory(ttyDir);
+            Directory.CreateSymbolicLink(Path.Combine(ttyDir, "device"), "../../..");
+            Directory.CreateSymbolicLink(Path.Combine(classTty, tty),
+                Path.Combine("..", "..", "devices", "usb", usbName, usbName + ":1.0", "tty", tty));
+        }
+        return usb;
+    }
+
+    foreach (string tty in new[] { "ttyUSB0", "ttyUSB1", "ttyUSB2", "ttyUSB3" }) AddDevice("2-1", tty);
+    string[] oneDevice = { "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB3" };
+    Check(Kirin_Tool.Utils.LinuxSerialPortFinder.FindPort(0x12d1, 0x3609, ttyClassRoot: classTty, ports: oneDevice) == "/dev/ttyUSB0",
+        "four ttys of one physical device still resolve to one port (GUI behaviour unchanged)");
+    Check(Kirin_Tool.Utils.LinuxSerialPortFinder.FindPort(0x12d1, 0x9999, ttyClassRoot: classTty, ports: oneDevice) == null,
+        "a different product id matches no port (unchanged filter)");
+
+    AddDevice("2-2", "ttyUSB4");
+    string[] twoDevices = oneDevice.Concat(new[] { "/dev/ttyUSB4" }).ToArray();
+    bool refused = false;
+    try
+    {
+        Kirin_Tool.Utils.LinuxSerialPortFinder.FindPort(0x12d1, 0x3609, ttyClassRoot: classTty, ports: twoDevices);
+    }
+    catch (Kirin_Tool.Utils.AmbiguousSerialDeviceException ex)
+    {
+        refused = ex.Message.Contains("--port") && ex.Message.Contains("ttyUSB0") && ex.Message.Contains("ttyUSB4");
+    }
+    Check(refused, "two physical devices with the same VID/PID are refused with both named and --port suggested");
+    try { Directory.Delete(sys, recursive: true); } catch { }
 }
 
 stubEnvironment.Clear();

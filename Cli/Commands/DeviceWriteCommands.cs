@@ -123,7 +123,19 @@ internal abstract class GatedDeviceWriteCommand : ICliCommand
         if (!admission.IsApproved)
             return ApprovalReport.Refuse(context, Name, admission.Decision);
 
-        return await RunAsync(args, context, admission, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await RunAsync(args, context, admission, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Kirin_Tool.Services.DeviceIdentityGate.DeviceIdentityRefusedException ex)
+        {
+            // K6: the loader answered getvar product with something that is not a model name.
+            // Nothing was written; this is a refusal verdict, not a crash.
+            return WriteResult(context, Name, CapabilityId,
+                WriteReports.Failed(new { error = ex.Message, deviceIdentity = "unidentified" },
+                    ExitCodes.DeviceRejected, "device_identity_refused"),
+                "refused: " + ex.Message);
+        }
     }
 
     private readonly string? sessionId = null;

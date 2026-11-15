@@ -36,7 +36,8 @@ public sealed record PreOpBackupResult(
     string? Directory,
     string? ManifestPath,
     IReadOnlyList<PreOpBackupPartitionResult> Partitions,
-    string? Error)
+    string? Error,
+    DeviceIdentity? Identity = null)
 {
     public static readonly PreOpBackupResult Skipped =
         new(false, false, null, null, Array.Empty<PreOpBackupPartitionResult>(), "disabled");
@@ -192,8 +193,6 @@ public sealed class PreOpBackup
         op.Step("backup directory: " + backupDir);
 
         if (!_deviceIdentityRead) await ReadDeviceIdentityAsync(op);
-        op.Step("device identity: product=" + (DeviceProduct ?? "(unread)")
-            + ", serial=" + (DeviceSerial ?? "(unread)"));
 
         var partitions = new List<PreOpBackupPartitionResult>();
         // Same partition, single dump per process: cache the result by name (case-insensitive).
@@ -259,7 +258,7 @@ public sealed class PreOpBackup
         op.Result(complete, null, null, null, null, verdict,
             (complete ? "every partition dumped" : "incomplete backup: " + reasons)
             + (manifestPath == null ? "; manifest missing" : ""));
-        return new PreOpBackupResult(true, complete, backupDir, manifestPath, partitions, null);
+        return new PreOpBackupResult(true, complete, backupDir, manifestPath, partitions, null, Identity);
     }
 
     /// <summary>One step line per partition: status is the evidence, never just a boolean.</summary>
@@ -390,6 +389,14 @@ public sealed class PreOpBackup
                 timestampUtc = DateTime.UtcNow.ToString("o"),
                 fastboot = options.FastbootPath,
                 device = new { product = DeviceProduct, serialNumber = DeviceSerial },
+                identity = Identity == null ? null : new
+                {
+                    status = Identity.Status.ToString(),
+                    product = Identity.Product,
+                    serialNumber = Identity.Serial,
+                    refused = Identity.Refused,
+                    reason = Identity.Reason,
+                },
                 trigger = options.Trigger,
                 writePlan = options.WritePartitions,
                 partitions = partitions.Select(p => new
@@ -433,11 +440,24 @@ public sealed class PreOpBackup
     // Why the manifest could not be written (surfaced as a step line instead of an empty catch).
     private string? _manifestError;
 
+    /// <summary>
+    /// K6: the identity the write path will be gated on. Recorded (manifest + this op) so the audit
+    /// shows what the device claimed before any write; the *hard* refusal lives in
+    /// <see cref="FastbootClient.EnsureWritableIdentityAsync"/> because this recorder is also used by
+    /// read-only backup runs and must never turn an unreadable probe into "nothing was backed up".
+    /// </summary>
+    internal DeviceIdentity? Identity;
+
     internal async Task ReadDeviceIdentityAsync(OperationScope? op = null)
     {
         _deviceIdentityRead = true;
         DeviceProduct = await ReadDeviceVarAsync("product", op);
         DeviceSerial = await ReadDeviceVarAsync("serialno", op);
+        Identity = DeviceIdentityGate.EvaluateText(DeviceProduct, DeviceSerial);
+        op?.Step((Identity.Refused ? OpLog.FailedPrefix
+                : Identity.Status == IdentityReading.Read ? OpLog.OkPrefix : OpLog.DegradedPrefix)
+            + "device identity: " + Identity.Describe()
+            + ", serial=" + (DeviceSerial ?? "(unread)"));
     }
 
     private static void TryDeletePartial(string path, OperationScope? op = null)

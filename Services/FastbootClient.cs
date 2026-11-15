@@ -35,6 +35,14 @@ namespace Kirin_Tool.Services
     {
         private readonly string _fastbootPath;
 
+        /// <summary>
+        /// Cached pre-write identity probe (K6, audit 2026-11-15 §4). Read once per client: the
+        /// product cannot change under a running fastboot session, and a write plan must not pay
+        /// for one extra spawn per partition. A refusal is cached too, so every later write in the
+        /// same session is refused without another probe.
+        /// </summary>
+        private DeviceIdentity? _identity;
+
         private const int UnlockTimeoutMinutes = 300;
 
         /// <summary>
@@ -49,21 +57,47 @@ namespace Kirin_Tool.Services
 
         public FastbootClient(string? executablePath = null)
         {
-            _fastbootPath = !string.IsNullOrWhiteSpace(executablePath)
-                ? ResolveExecutablePath(executablePath)
-                : ResolveDefaultFastbootPath();
+            if (!string.IsNullOrWhiteSpace(executablePath))
+            {
+                _fastbootPath = ResolveExecutablePath(executablePath);
+            }
+            else
+            {
+                _fastbootPath = ResolveDefaultFastbootPath(out bool systemFallback);
+                IsSystemFastboot = systemFallback;
+            }
         }
 
+        /// <summary>The fastboot executable every command of this client is sent to.</summary>
+        public string ExecutablePath => _fastbootPath;
+
+        /// <summary>
+        /// True when the bundled Huawei client was missing and the system Google platform-tools
+        /// <c>fastboot</c> was used instead. The two are not equivalent on these loaders (the write
+        /// path warns about it in the diagnostics log); an explicit path never sets this.
+        /// </summary>
+        public bool IsSystemFastboot { get; }
+
+        /// <summary>
+        /// 「有设备可写吗」的唯一判据。上游只看「任意一台处于 fastboot 的设备」，
+        /// 多设备主机上（手表 18d1:d00d、别的手机）会误判成本项目设备可写（审计 B 类）。
+        /// 配置了 <see cref="DeviceSerial"/>（KIRIN_SERIAL/ANDROID_SERIAL/P40_SERIAL）时
+        /// 只认那一台；未配置时保持上游语义。
+        /// </summary>
         public async Task<bool> IsDeviceConnected()
         {
             try
             {
                 var result = await ProcessRunner.RunAsync(_fastbootPath, "devices", op: "fastboot.devices");
-                return result.IsSuccess && result.Output
+                if (!result.IsSuccess) return false;
+
+                string? pinned = DeviceSerial.Resolve();
+                return result.Output
                     .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                     .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                     .Any(columns => columns.Length >= 2 &&
-                        string.Equals(columns[1], "fastboot", StringComparison.OrdinalIgnoreCase));
+                        string.Equals(columns[1], "fastboot", StringComparison.OrdinalIgnoreCase) &&
+                        (pinned == null || string.Equals(columns[0], pinned, StringComparison.OrdinalIgnoreCase)));
             }
             catch (Exception)
             {
@@ -71,8 +105,64 @@ namespace Kirin_Tool.Services
             }
         }
 
-        private static string ResolveDefaultFastbootPath()
+        /// <summary>
+        /// K6 write gate: the loader must answer <c>getvar product</c> with a model name before any
+        /// irreversible write is sent. Returns the verdict; throws <see cref="InvalidOperationException"/>
+        /// (after recording a <c>write.identity</c> op with verdict <c>device-identity</c>) when the
+        /// loader answered something that is not an identity — the 2026-11-15 rescue write ran on
+        /// another phone because a bare "OKAY" was accepted as "product".
+        ///
+        /// Probes that cannot run (no device, stub binary, timeout) do not refuse the write: they are
+        /// recorded as unreadable, so no chip family is blocked by a naming whitelist.
+        /// </summary>
+        public async Task<DeviceIdentity> EnsureWritableIdentityAsync()
         {
+            if (_identity is { Refused: true } refused) throw Refusal(refused, null);
+            if (_identity != null) return _identity;
+
+            // A write-path warning, not a refusal: Google platform-tools may behave differently
+            // against these loaders, so the audit trail must say which binary was used.
+            if (IsSystemFastboot)
+                ProcessRunner.WriteDiagnostic("FastbootClient",
+                    "warning: using the system fastboot at " + _fastbootPath
+                    + " (the bundled Huawei client was not found); a write is being attempted with it");
+
+            ProcessResult? read = null;
+            try
+            {
+                read = await ProcessRunner.RunAsync(_fastbootPath, new[] { "getvar", "product" },
+                    timeoutSeconds: 10, op: "fastboot.getvar");
+            }
+            catch (Exception)
+            {
+                read = null;
+            }
+
+            string? product = read == null ? null : DeviceIdentityGate.ParseProduct(read.Output);
+            DeviceIdentity identity = DeviceIdentityGate.Evaluate(read, product);
+            _identity = identity;
+
+            if (identity.Refused) throw Refusal(identity, read);
+            return identity;
+        }
+
+        /// <summary>One <c>write.identity</c> op per refusal, then the exception the callers already handle.</summary>
+        private static DeviceIdentityGate.DeviceIdentityRefusedException Refusal(DeviceIdentity identity, ProcessResult? read)
+        {
+            string message = "Refusing to write: the device did not identify itself. " + identity.Reason
+                + ". Reconnect the phone and confirm 'fastboot getvar product' answers a model name"
+                + " (e.g. ELS-AN00) before writing anything.";
+            using OperationScope op = OpLog.Begin(OpNames.WriteIdentity, OpLog.FlashTool,
+                new[] { "getvar", "product" }, "pre-write identity gate (audit 2026-11-15 §4)");
+            op.Step(OpLog.FailedPrefix + "identity: " + identity.Describe());
+            op.Result(false, read?.ExitCode, null, read?.Output, null,
+                DeviceIdentityGate.VerdictRefused, message);
+            return new DeviceIdentityGate.DeviceIdentityRefusedException(message);
+        }
+
+        private static string ResolveDefaultFastbootPath(out bool systemFallback)
+        {
+            systemFallback = false;
             if (OperatingSystem.IsWindows())
             {
                 return Path.Combine(AppContext.BaseDirectory, "fastboot", "fastboot.exe");
@@ -87,6 +177,7 @@ namespace Kirin_Tool.Services
             }
 
             const string systemPath = "/usr/bin/fastboot";
+            systemFallback = true;
             return File.Exists(systemPath) ? systemPath : "fastboot";
         }
 
@@ -114,17 +205,20 @@ namespace Kirin_Tool.Services
 
         public async Task<ProcessResult> WriteNveVariable(string variable, string value)
         {
+            await EnsureWritableIdentityAsync();
             // A write disguised as getvar (audit H34): the op name says "set", the argv says why.
             return await ProcessRunner.RunAsync(_fastbootPath, $"getvar nve:{variable}@{value}", op: "fastboot.setvar.nve");
         }
 
         public async Task<ProcessResult> FlashPartition(string partitionName, string filePath)
         {
+            await EnsureWritableIdentityAsync();
             return await ProcessRunner.RunAsync(_fastbootPath, new[] { "flash", partitionName, filePath }, op: "fastboot.flash");
         }
 
         public async Task<FrpBypassResult> EraseFrpWithSteps()
         {
+            await EnsureWritableIdentityAsync();
             var result = new FrpBypassResult();
 
             var step1Result = await ProcessRunner.RunAsync(_fastbootPath, "erase frp", op: "fastboot.erase-frp.step1");
@@ -145,6 +239,7 @@ namespace Kirin_Tool.Services
 
         public async Task<EnableDowngradeResult> EnableDowngradeWithSteps()
         {
+            await EnsureWritableIdentityAsync();
             var result = new EnableDowngradeResult();
 
             var step1Result = await ProcessRunner.RunAsync(_fastbootPath, "oem oeminfoerase-amssver", op: "fastboot.enable-downgrade.step1");
@@ -173,6 +268,7 @@ namespace Kirin_Tool.Services
 
         public async Task<ProcessResult> FlashOemInfo(string filePath)
         {
+            await EnsureWritableIdentityAsync();
             return await ProcessRunner.RunAsync(_fastbootPath, $"flash oeminfo \"{filePath}\"", op: "fastboot.flash-oeminfo");
         }
 
@@ -240,6 +336,8 @@ namespace Kirin_Tool.Services
 
             try
             {
+                // K6: nothing irreversible is sent before the loader named its model.
+                await EnsureWritableIdentityAsync();
                 ProcessResult result = await ProcessRunner.RunStreamingAsync(
                     _fastbootPath,
                     new[] { "oem", "unlock", code },

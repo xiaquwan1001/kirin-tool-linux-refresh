@@ -58,6 +58,12 @@ namespace Kirin_Tool.Services.Diagnostics
 
         /// <summary>Erasing the oeminfo version fields (4 × oem oeminfoerase-*ver) to allow a downgrade.</summary>
         public const string DowngradeErase = "downgrade.erase";
+
+        /// <summary>
+        /// The pre-write identity gate (audit 2026-11-15 §4): a write was refused because the loader
+        /// answered <c>getvar product</c> with something that is not a model name.
+        /// </summary>
+        public const string WriteIdentity = "write.identity";
     }
 
     /// <summary>Tool/category values used by the op scopes below (they become directory names).</summary>

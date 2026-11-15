@@ -170,6 +170,8 @@ internal static class Program
             Check(json.Contains("\"trigger\": \"flash-ota\"", StringComparison.Ordinal), "manifest records trigger");
             Check(json.Contains("\"sha256\":", StringComparison.Ordinal), "manifest records sha256");
             Check(json.Contains("\"serialNumber\": null", StringComparison.Ordinal), "unreadable device SN is null");
+            Check(json.Contains("\"identity\"", StringComparison.Ordinal) && json.Contains("\"refused\": false", StringComparison.Ordinal),
+                "K6: the manifest records the identity verdict (no dump reader wired -> unreadable, not refused)");
             Check(json.Contains("\"writePlan\":", StringComparison.Ordinal), "manifest records the write plan");
         }
         finally
