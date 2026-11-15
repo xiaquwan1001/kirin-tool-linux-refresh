@@ -90,6 +90,98 @@ public sealed class DeviceWriteOps
     }
 
     /// <summary>
+    /// oeminfowrite-KTModel@&lt;model&gt; / oeminfowrite-KTVendor@&lt;vendor&gt; — the loader's direct
+    /// field write. Same redline object as <see cref="FlashOemInfoAsync"/> (the oeminfo partition
+    /// holds model/region/identity), so it demands the very same capability ticket; before this the
+    /// GUI's "Convert OEM" direct branch sent these three commands with no approval and no write
+    /// gate at all (audit 2026-11-15 round3 §3.1).
+    ///
+    /// The identity gate runs here explicitly: <c>FastbootClient.OemCommandAsync</c> is a generic
+    /// OEM pass-through and does not probe the device itself.
+    /// </summary>
+    public async Task<string> OemInfoWriteFieldAsync(WriteTicket ticket, string field, string value, CancellationToken cancellationToken = default)
+    {
+        Require(ticket, "oeminfo-flash");
+        (string safeField, string safeValue) = OemInfoField(field, value);
+
+        using OperationScope op = OpLog.Begin(OpNames.OemInfoWrite, OpLog.FlashTool,
+            new[] { "oem oeminfowrite-" + safeField + "@<redacted>" }, "write one oeminfo field over the loader");
+        op.Step("target: oeminfo field " + safeField + " [redline: model/vendor are device identity]");
+        try
+        {
+            await Client.EnsureWritableIdentityAsync();
+            string output = await Client.OemCommandAsync("oeminfowrite-" + safeField + "@" + safeValue);
+            bool ok = output.Contains("OKAY", StringComparison.OrdinalIgnoreCase);
+            op.Step((ok ? OpLog.OkPrefix : OpLog.FailedPrefix) + "oeminfowrite-" + safeField
+                + " -> " + (ok ? "okay=yes" : "okay=no") + " :: " + OpLog.OneLine(output));
+            op.Result(ok, null, null, output, ok ? null : "the loader printed no OKAY",
+                ok ? "loader answered OKAY" : "loader-answer",
+                ok ? "the loader accepted the field write; the value was not read back"
+                   : "the loader did not answer OKAY; the field write is not confirmed");
+            return output;
+        }
+        catch (Exception ex)
+        {
+            op.Step(OpLog.FailedPrefix + "oeminfowrite-" + safeField + ": " + OpLog.ExceptionVerdict(ex) + ": " + ex.Message);
+            op.Result(false, null, null, null, ex.Message, OpLog.ExceptionVerdict(ex));
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// oem oeminfoerase-disablewp — removes the write protection that guards the oeminfo fields
+    /// above. Part of the same redline write, so the same ticket authorizes it.
+    /// </summary>
+    public async Task<string> OemInfoEraseWriteProtectionAsync(WriteTicket ticket, CancellationToken cancellationToken = default)
+    {
+        Require(ticket, "oeminfo-flash");
+
+        using OperationScope op = OpLog.Begin(OpNames.OemInfoWrite, OpLog.FlashTool,
+            new[] { "oem oeminfoerase-disablewp" }, "remove oeminfo write protection");
+        op.Step("target: oeminfo write protection [redline: it re-enables the field writes below]");
+        try
+        {
+            await Client.EnsureWritableIdentityAsync();
+            string output = await Client.OemCommandAsync("oeminfoerase-disablewp");
+            bool ok = output.Contains("OKAY", StringComparison.OrdinalIgnoreCase);
+            op.Step((ok ? OpLog.OkPrefix : OpLog.FailedPrefix) + "oeminfoerase-disablewp -> "
+                + (ok ? "okay=yes" : "okay=no") + " :: " + OpLog.OneLine(output));
+            op.Result(ok, null, null, output, ok ? null : "the loader printed no OKAY",
+                ok ? "loader answered OKAY" : "loader-answer",
+                ok ? "write protection reported removed by the loader" : "write protection removal is not confirmed");
+            return output;
+        }
+        catch (Exception ex)
+        {
+            op.Step(OpLog.FailedPrefix + "oeminfoerase-disablewp: " + OpLog.ExceptionVerdict(ex) + ": " + ex.Message);
+            op.Result(false, null, null, null, ex.Message, OpLog.ExceptionVerdict(ex));
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The one validator for the two oeminfo text fields: they end up inside a loader command, so
+    /// whitespace/quotes/control characters are refused instead of being handed to argv splitting
+    /// (audit 2026-11-15 round3 §5.2), and a field longer than a GPT name is refused up front.
+    /// </summary>
+    private static (string Field, string Value) OemInfoField(string field, string value)
+    {
+        string normalized = (field ?? "").Trim();
+        if (normalized is not ("KTModel" or "KTVendor"))
+            throw new ArgumentException("unsupported oeminfo field '" + normalized + "'", nameof(field));
+
+        string text = (value ?? "").Trim();
+        if (text.Length is 0 or > 64)
+            throw new ArgumentException("an oeminfo field value must be 1..64 characters", nameof(value));
+        foreach (char c in text)
+        {
+            if (!char.IsAsciiLetterOrDigit(c) && c != '.' && c != '_' && c != '-' && c != ' ')
+                throw new ArgumentException("an oeminfo field value may only contain letters, digits, '.', '_', '-' and spaces", nameof(value));
+        }
+        return (normalized, text);
+    }
+
+    /// <summary>
     /// oem oeminfoerase-{amss,base,cust,preload}ver — the version-field erase that (attempts to) make a
     /// downgrade possible. Four irreversible commands, so this is a redline capability in its own right
     /// (D-13): the GUI button, the CLI `downgrade-erase` command and the MCP tool all end up here and

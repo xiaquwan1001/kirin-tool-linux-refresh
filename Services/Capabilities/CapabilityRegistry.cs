@@ -105,15 +105,21 @@ public static class CapabilityRegistry
 
         // oeminfo was one row that lied about itself: the CLI/MCP only plan, while the GUI flashed
         // the result of that plan straight to the device. Two capabilities, one per outcome (D-01).
+        // BtnConvertOem_Click keeps BOTH faces: its direct-command branch (hisi710/710a/810/820/
+        // 970/980/985/990) is a device write and now runs as the 'oeminfo-flash' capability with the
+        // same ticket + identity gate (audit 2026-11-15 round3 §3.1); only the image-generation half
+        // is PlanOnly and is described by this row.
         new("oeminfo-convert", "OEMINFO 型号/区域改写（本地生成镜像）", "oeminfo", "oeminfo", "BtnConvertOem_Click",
             CapabilityWriteKind.PlanOnly, ["model", "region", "input", "pull"],
             ["在宿主机上生成改写后的 oeminfo.img（只写本地文件，不写设备）",
-             "oeminfo 是红线段（HMAC 用设备密钥，无法离线重算）；把它写进设备是另一条能力 oeminfo-flash"]),
+             "oeminfo 是红线段（HMAC 用设备密钥，无法离线重算）；把它写进设备是另一条能力 oeminfo-flash",
+             "同一按钮的直写分支（oeminfowrite-KTModel/KTVendor）走 oeminfo-flash 的审批票据与身份闸门"]),
 
         new("oeminfo-flash", "刷写转换后的 OEMINFO 镜像", "oeminfo-flash", "oeminfo_flash", "HandleOemInfoFlash",
             CapabilityWriteKind.Write, ["file", "allow-redline", "yes", "json"],
             ["把转换后的镜像真实写入 oeminfo 分区（红线段：身份/型号/区域，HMAC 由设备密钥生成）",
-             "写错无法在工具内回退，只能整包重刷或走救援"],
+             "写错无法在工具内回退，只能整包重刷或走救援",
+             "GUI 的直写分支（oem oeminfowrite-KTModel@… / KTVendor@… / oeminfoerase-disablewp）用同一能力、同一张票据"],
             Approval: CapabilityApprovalKind.RedlineTypedConfirm,
             Reversibility: ApprovalReversibility.Irreversible,
             ServiceMethod: "DeviceWriteOps.FlashOemInfoAsync"),

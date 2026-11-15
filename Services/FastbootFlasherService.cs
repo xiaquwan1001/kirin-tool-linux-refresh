@@ -228,7 +228,15 @@ namespace Kirin_Tool.Services
             var settings = new XmlReaderSettings
             {
                 IgnoreWhitespace = true,
-                IgnoreComments = true
+                IgnoreComments = true,
+                // XML defaults already prohibit DTDs on .NET 5+, but a flashing xml comes from
+                // wherever the user got it, so state it instead of relying on a default: no DTD,
+                // no resolver, and a bounded document (a multi-GB xml would be loaded whole).
+                // (audit 2026-11-15 round3 §1.3)
+                DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 16L * 1024 * 1024,
+                MaxCharactersFromEntities = 0,
             };
 
             XDocument doc;
@@ -264,34 +272,57 @@ namespace Kirin_Tool.Services
 
                     // Path.Combine handles forward slashes correctly on both Windows and Linux in modern .NET
 
-                    var xmlDirectory = Path.GetDirectoryName(xmlPath) ?? ".";
+                    var xmlDirectory = Path.GetFullPath(Path.GetDirectoryName(xmlPath) ?? ".");
                     var parentDirectory = Path.GetDirectoryName(xmlDirectory);
 
+                    // The <image> text is a path from the package, i.e. untrusted input: it used to
+                    // be taken verbatim (absolute) or combined with the xml directory without any
+                    // check, so a crafted flashing xml could hand /etc/shadow to 'fastboot flash'
+                    // (audit 2026-11-15 round3 §1.3). Only the xml directory and its parent — the
+                    // two places the old lookup could already resolve to — are allowed.
+                    string candidatePath;
                     if (Path.IsPathRooted(fileName))
                     {
-                        partition.DumpPath = fileName;
+                        candidatePath = Path.GetFullPath(fileName);
                     }
                     else
                     {
-                        var candidatePath = Path.Combine(xmlDirectory, fileName);
+                        candidatePath = Path.GetFullPath(Path.Combine(xmlDirectory, fileName));
 
                         if (!File.Exists(candidatePath) && !string.IsNullOrEmpty(parentDirectory))
                         {
-                            var parentCandidate = Path.Combine(parentDirectory, fileName);
+                            string parentCandidate = Path.GetFullPath(Path.Combine(parentDirectory, fileName));
                             if (File.Exists(parentCandidate))
                             {
                                 candidatePath = parentCandidate;
                             }
                         }
-
-                        partition.DumpPath = candidatePath;
                     }
+
+                    if (!IsWithinDirectory(xmlDirectory, candidatePath) &&
+                        (string.IsNullOrEmpty(parentDirectory) || !IsWithinDirectory(parentDirectory, candidatePath)))
+                    {
+                        throw new InvalidDataException(
+                            "flashing xml entry '" + name + "' resolves to '" + candidatePath
+                            + "', which is outside the package directory '" + xmlDirectory + "'");
+                    }
+
+                    partition.DumpPath = candidatePath;
 
                     partitions.Add(partition);
                 }
             }
 
             return partitions;
+        }
+
+        /// <summary>True when <paramref name="candidate"/> is strictly inside <paramref name="directory"/>.</summary>
+        private static bool IsWithinDirectory(string directory, string candidate)
+        {
+            string root = Path.GetFullPath(directory);
+            string prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return candidate.StartsWith(prefix, comparison);
         }
 
     }

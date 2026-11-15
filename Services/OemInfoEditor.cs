@@ -65,8 +65,16 @@ namespace Kirin_Tool.Services
             return -1;
         }
 
+        /// <summary>Longest accepted model/vendor value (a GPT name is 36 chars; 64 is generous).</summary>
+        public const int MaxFieldLength = 64;
+
         public byte[] EditEntries(string model, string regionVendor)
         {
+            // Both values land inside one 1024-byte block. Validate up front so a too-long value
+            // cannot be written over the next block's magic/id header (audit §1.2).
+            ValidateField(model, nameof(model));
+            ValidateField(regionVendor, nameof(regionVendor));
+
             if (!TargetIdsMap.ContainsKey(_detectedVersion))
                 throw new System.NotSupportedException($"OEMINFO version '{_detectedVersion}' is not supported for modification.");
 
@@ -92,19 +100,47 @@ namespace Kirin_Tool.Services
             return modifiedData;
         }
 
+        private static void ValidateField(string? value, string name)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                throw new InvalidDataException("OEMINFO " + name + " cannot be empty.");
+            if (value!.Length > MaxFieldLength)
+                throw new InvalidDataException(
+                    "OEMINFO " + name + " is " + value.Length + " characters; the limit is " + MaxFieldLength + ".");
+            foreach (char c in value)
+            {
+                if (char.IsControl(c))
+                    throw new InvalidDataException("OEMINFO " + name + " contains a control character.");
+            }
+        }
+
         private void UpdateEntry(byte[] data, int blockOffset, string newString)
         {
             var newBytes = Encoding.UTF8.GetBytes(newString);
             int newLen = newBytes.Length;
 
-            System.Buffer.BlockCopy(System.BitConverter.GetBytes(newLen), 0, data, blockOffset + 20, 4);
+            // Bounds: the length prefix, the payload and the padding all have to stay inside this
+            // block *and* inside the array. The old code had no check at all: a value longer than
+            // the 512-byte payload silently overwrote the next block's OEM_INFO header, and the
+            // resulting image was then flashed into the oeminfo partition (audit §1.2).
+            int maxPayloadSize = BlockSize - DataPayloadOffsetInBlock;
+            if (newLen > maxPayloadSize)
+                throw new InvalidDataException(
+                    "OEMINFO value is " + newLen + " bytes; one block holds at most " + maxPayloadSize + ".");
+            if (blockOffset < 0 || blockOffset + BlockSize > data.Length)
+                throw new InvalidDataException(
+                    "OEMINFO block at offset " + blockOffset + " does not fit in the " + data.Length + "-byte image.");
 
             int dataStartOffset = blockOffset + DataPayloadOffsetInBlock;
+            if (dataStartOffset + newLen > data.Length)
+                throw new InvalidDataException("OEMINFO payload would be written past the end of the image.");
+
+            System.Buffer.BlockCopy(System.BitConverter.GetBytes(newLen), 0, data, blockOffset + 20, 4);
             System.Buffer.BlockCopy(newBytes, 0, data, dataStartOffset, newLen);
 
             int paddingStart = dataStartOffset + newLen;
-            int maxPayloadSize = BlockSize - DataPayloadOffsetInBlock;
-            for (int i = paddingStart; i < blockOffset + DataPayloadOffsetInBlock + maxPayloadSize; i++)
+            int blockEnd = System.Math.Min(blockOffset + BlockSize, data.Length);
+            for (int i = paddingStart; i < blockEnd; i++)
             {
                 data[i] = 0xFF;
             }

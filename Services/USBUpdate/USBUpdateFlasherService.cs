@@ -166,7 +166,11 @@ namespace Kirin_Tool.Services.USBUpdate
                         string unlockPath = Path.Combine(subDir, "unlockcode");
                         if (File.Exists(unlockPath))
                         {
-                            File.Copy(unlockPath, Path.Combine(_dloadDirectory, "unlockcode"), true);
+                            string copiedUnlockPath = Path.Combine(_dloadDirectory, "unlockcode");
+                            File.Copy(unlockPath, copiedUnlockPath, true);
+                            // File.Copy inherits the umask; the unlock code is a package secret
+                            // (OperationLogger masks it) and must not be world-readable on disk.
+                            PrivateWorkDirectory.RestrictFile(copiedUnlockPath);
                             unlockCodeExtracted = true;
                             unpack.Step(OpLog.OkPrefix + "unlockcode extracted -> " + Path.Combine(_dloadDirectory, "unlockcode"));
                         }
