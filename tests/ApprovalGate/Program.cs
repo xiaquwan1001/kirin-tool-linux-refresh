@@ -77,6 +77,8 @@ Check(await redlineWrongPhrase.RequestAsync(Sn(), CancellationToken.None) is App
 var redlineOk = new GuiApprovalGate(new ScriptedPrompt(new ApprovalPromptAnswer(ApprovalPromptOutcome.Approved, Sn().ConfirmPhrase)), null, auditMemory);
 ApprovalDecision redlineApproved = await redlineOk.RequestAsync(Sn(), CancellationToken.None);
 Check(redlineApproved.IsApproved, "redline + exact phrase -> Approved");
+Check(redlineApproved is ApprovalDecision.Approved { TypedPhrase: string phrase } && phrase == Sn().ConfirmPhrase,
+    "redline: the approved decision carries the phrase the operator typed (MCP compares it itself)");
 Check(auditMemory.Entries.Any(entry => entry.CapabilityId == "write-sn" && entry.TypedConfirm),
     "audit: the typed-confirm approval is recorded as typedConfirm=true");
 
@@ -118,20 +120,120 @@ Check(await mcpNoGui.RequestAsync(McpReboot() with { Acknowledged = false }, Can
 
 // ---------------------------------------------------------------- 5. the IPC channel really works
 string socketPath = Path.Combine(Path.GetTempPath(), "kirin-approval-test-" + Guid.NewGuid().ToString("n") + ".sock");
+// The GUI answers with the phrase the operator actually typed. Echoing request.ConfirmPhrase is
+// legitimate here because the real GUI gate (GuiApprovalGate) compares the typed text before it
+// returns Approved; the answer only relays what that comparison accepted.
 using (var server = new GuiApprovalServer((request, token) => Task.FromResult(
-           new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, request.RequiresTypedConfirm, null, ApprovalScope.Once)), socketPath))
+           new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, request.RequiresTypedConfirm, null, ApprovalScope.Once,
+               request.RequiresTypedConfirm ? request.ConfirmPhrase : null)), socketPath))
 {
     Check(server.Start(), "IPC: the GUI side binds " + socketPath);
     var bridge = new SocketGuiApprovalBridge(socketPath);
     Check(bridge.IsGuiRunning(), "IPC: the bridge detects the running GUI");
-    GuiApprovalAnswer answer = await bridge.RequestApprovalAsync(McpReboot(), CancellationToken.None);
-    Check(answer.Outcome == ApprovalPromptOutcome.Approved, "IPC: a request round-trips to the GUI and back");
+    GuiApprovalResult roundTrip = await bridge.RequestApprovalAsync(McpReboot(), CancellationToken.None);
+    Check(roundTrip.Answer.Outcome == ApprovalPromptOutcome.Approved, "IPC: a request round-trips to the GUI and back");
+    Check(roundTrip.PeerVerified, "IPC: the client proves the peer uid with the kernel (SO_PEERCRED)");
+    Check(!OperatingSystem.IsWindows() && File.GetUnixFileMode(socketPath) == (UnixFileMode.UserRead | UnixFileMode.UserWrite),
+        "IPC: the socket entry itself is 0600 (only this user may even connect)");
 
     var mcpWithGui = new McpApprovalGate(bridge, null, mcpAudit);
     Check(await mcpWithGui.RequestAsync(McpReboot() with { SessionId = "mcp-gui" }, CancellationToken.None) is ApprovalDecision.Approved,
         "MCP: with a GUI listening, the human answer approves the write");
 }
 Check(!new SocketGuiApprovalBridge(socketPath).IsGuiRunning(), "IPC: after the GUI stops, the bridge reports it as not running");
+
+// ---------------------------------------------------------------- 5b. S2: peer uid is the gate
+// (a) A channel whose peer runs as another uid must be refused. Both directions are pinned: the
+//     server refuses a connection it cannot vouch for, and a client refuses an answer from a socket
+//     that is not owned by this user.
+ApprovalRequest McpRedline() => Sn() with { Acknowledged = true, Origin = ApprovalOrigin.Mcp, SessionId = "mcp-redline-" + Guid.NewGuid().ToString("n") };
+
+string foreignServerSocket = Path.Combine(Path.GetTempPath(), "kirin-approval-foreign-" + Guid.NewGuid().ToString("n") + ".sock");
+using (var foreignServer = new GuiApprovalServer((request, token) => Task.FromResult(
+           new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, false, null, ApprovalScope.Once)),
+       foreignServerSocket, expectedPeerUid: PeerCredentials.CurrentUid + 1))
+{
+    Check(foreignServer.Start(), "IPC: a server bound for a different uid still binds");
+    ApprovalDecision refused = await new McpApprovalGate(new SocketGuiApprovalBridge(foreignServerSocket), null, mcpAudit)
+        .RequestAsync(McpReboot() with { SessionId = "mcp-foreign" }, CancellationToken.None);
+    Check(refused is ApprovalDecision.Denied deniedPeer && deniedPeer.Reason.Contains("rejected", StringComparison.OrdinalIgnoreCase),
+        "IPC: the server refuses a peer whose uid it does not expect (answer=Denied)");
+    Check(!refused.IsApproved, "IPC: a peer-uid mismatch can never approve a write");
+}
+
+string localServerSocket = Path.Combine(Path.GetTempPath(), "kirin-approval-local-" + Guid.NewGuid().ToString("n") + ".sock");
+using (var localServer = new GuiApprovalServer((request, token) => Task.FromResult(
+           new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, false, null, ApprovalScope.Once)), localServerSocket))
+{
+    Check(localServer.Start(), "IPC: a server for this uid binds");
+    var wrongExpectation = new SocketGuiApprovalBridge(localServerSocket, expectedPeerUid: PeerCredentials.CurrentUid + 1);
+    bool clientRefused = false;
+    try { await wrongExpectation.RequestApprovalAsync(McpReboot(), CancellationToken.None); }
+    catch (GuiNotRunningException ex) when (ex.Message.Contains("not authenticated", StringComparison.OrdinalIgnoreCase)) { clientRefused = true; }
+    Check(clientRefused, "IPC: the client refuses a channel whose peer uid is not this user (fail closed)");
+}
+
+// (b) "TypedConfirm: true" alone is never an approval: the phrase itself has to come back.
+foreach ((string Label, GuiApprovalAnswer Answer, bool ExpectApproved) in new[]
+{
+    ("denies a bare TypedConfirm=true with no phrase",
+        new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, true, null, ApprovalScope.Once), false),
+    ("denies the wrong phrase",
+        new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, true, null, ApprovalScope.Once, "I UNDERSTAND something-else"), false),
+    ("accepts the exact per-capability phrase",
+        new GuiApprovalAnswer(ApprovalPromptOutcome.Approved, true, null, ApprovalScope.Once, Sn().ConfirmPhrase), true),
+})
+{
+    string scriptedSocket = Path.Combine(Path.GetTempPath(), "kirin-approval-scripted-" + Guid.NewGuid().ToString("n") + ".sock");
+    using (var scripted = new GuiApprovalServer((request, token) => Task.FromResult(Answer), scriptedSocket))
+    {
+        Check(scripted.Start(), "IPC: scripted answer server binds");
+        ApprovalDecision decision = await new McpApprovalGate(new SocketGuiApprovalBridge(scriptedSocket), null, mcpAudit)
+            .RequestAsync(McpRedline(), CancellationToken.None);
+        Check(decision.IsApproved == ExpectApproved, "MCP redline: " + Label);
+    }
+}
+
+// (c) A redline approval is never reused from the session cache, even for an identical request.
+var redlineCache = new SessionApprovalCache();
+var redlinePrompt = new ScriptedPrompt(
+    new ApprovalPromptAnswer(ApprovalPromptOutcome.Approved, Sn().ConfirmPhrase),
+    new ApprovalPromptAnswer(ApprovalPromptOutcome.Approved, Sn().ConfirmPhrase));
+var redlineCachedGate = new GuiApprovalGate(redlinePrompt, redlineCache, new MemoryApprovalAuditSink());
+ApprovalRequest redlineRepeated = Sn() with { SessionId = redlineCache.SessionId };
+Check(await redlineCachedGate.RequestAsync(redlineRepeated, CancellationToken.None) is ApprovalDecision.Approved,
+    "redline cache: the first phrased approval goes through");
+Check(await redlineCachedGate.RequestAsync(redlineRepeated, CancellationToken.None) is ApprovalDecision.Approved,
+    "redline cache: the second identical request is approved too");
+Check(redlinePrompt.Asked == 2, "redline cache: the phrase is asked again (asked=" + redlinePrompt.Asked + "), never replayed");
+
+// ---------------------------------------------------------------- 5c. S2: the socket lives in a private directory
+string? savedXdgRuntime = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+string expectedPrivateDir = Path.Combine(Path.GetTempPath(), "kirin-tool-" + PeerCredentials.CurrentUid);
+string sharedXdg = Path.Combine(Path.GetTempPath(), "kirin-shared-xdg-" + Guid.NewGuid().ToString("n"));
+try
+{
+    Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", null);
+    Check(ApprovalIpc.RuntimeDirectory == expectedPrivateDir,
+        "socket dir: without XDG_RUNTIME_DIR it is the per-uid private directory, never /tmp itself");
+    if (!OperatingSystem.IsWindows())
+        Check(File.GetUnixFileMode(ApprovalIpc.RuntimeDirectory) ==
+              (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute),
+            "socket dir: it is 0700");
+    Check(ApprovalIpc.SocketPath.StartsWith(expectedPrivateDir + Path.DirectorySeparatorChar, StringComparison.Ordinal),
+        "socket dir: the socket path is inside it");
+
+    Directory.CreateDirectory(sharedXdg);
+    if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(sharedXdg, (UnixFileMode)0b111_101_101); // 0755
+    Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", sharedXdg);
+    Check(ApprovalIpc.RuntimeDirectory == expectedPrivateDir,
+        "socket dir: a world-accessible XDG_RUNTIME_DIR is refused in favour of the private one");
+}
+finally
+{
+    Environment.SetEnvironmentVariable("XDG_RUNTIME_DIR", savedXdgRuntime);
+    try { Directory.Delete(sharedXdg, true); } catch { }
+}
 
 // ---------------------------------------------------------------- 6. audit + idempotency
 string auditPath = Path.Combine(Path.GetTempPath(), "kirin-approval-audit-" + Guid.NewGuid().ToString("n") + ".jsonl");
@@ -248,6 +350,6 @@ sealed class NoGuiBridge : IGuiApprovalBridge
 {
     public string Name => "no-gui";
     public bool IsGuiRunning() => false;
-    public Task<GuiApprovalAnswer> RequestApprovalAsync(ApprovalRequest request, CancellationToken cancellationToken) =>
+    public Task<GuiApprovalResult> RequestApprovalAsync(ApprovalRequest request, CancellationToken cancellationToken) =>
         throw new GuiNotRunningException("test: no GUI");
 }
