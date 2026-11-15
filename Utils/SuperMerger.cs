@@ -64,12 +64,23 @@ namespace Kirin_Tool.Utils
                     hLarge = ReadStruct<SparseHeader>(reader);
                     if (hLarge.Magic != SparseConstants.SPARSE_HEADER_MAGIC) 
                         throw new Exception($"File {Path.GetFileName(largePath)} is not a valid sparse image.");
+                    ValidateHeader(hLarge, largePath, largeLen);
 
                     for (int i = 0; i < hLarge.TotalChunks; i++)
                     {
                         lastChunkOffset = fs.Position;
                         var chunk = ReadStruct<ChunkHeader>(reader);
-                        fs.Seek(chunk.TotalSize - SparseConstants.CHUNK_HEADER_SIZE, SeekOrigin.Current);
+                        // TotalSize >= 12 and the payload has to be inside the file: a corrupt
+                        // TotalSize used to produce a negative Seek (bare IOException) or an
+                        // endless walk over a huge declared chunk count (audit §1.2).
+                        if (chunk.TotalSize < SparseConstants.CHUNK_HEADER_SIZE)
+                            throw new InvalidDataException(
+                                $"Sparse chunk {i} of {Path.GetFileName(largePath)} declares TotalSize={chunk.TotalSize} (< 12).");
+                        long payload = chunk.TotalSize - SparseConstants.CHUNK_HEADER_SIZE;
+                        if (fs.Position + payload > fs.Length)
+                            throw new InvalidDataException(
+                                $"Sparse chunk {i} of {Path.GetFileName(largePath)} runs past the end of the file.");
+                        fs.Seek(payload, SeekOrigin.Current);
                     }
                 }
 
@@ -95,9 +106,18 @@ namespace Kirin_Tool.Utils
                     hSmall = ReadStruct<SparseHeader>(reader);
                     if (hSmall.Magic != SparseConstants.SPARSE_HEADER_MAGIC) 
                         throw new Exception($"File {Path.GetFileName(smallPath)} is not a valid sparse image.");
+                    ValidateHeader(hSmall, smallPath, smallLen);
 
                     var firstChunk = ReadStruct<ChunkHeader>(reader);
+                    if (firstChunk.TotalSize < SparseConstants.CHUNK_HEADER_SIZE)
+                        throw new InvalidDataException(
+                            $"The first sparse chunk of {Path.GetFileName(smallPath)} declares TotalSize={firstChunk.TotalSize} (< 12).");
                     newDataOffset = fs.Position + (firstChunk.TotalSize - SparseConstants.CHUNK_HEADER_SIZE);
+                    if (newDataOffset > smallLen)
+                        throw new InvalidDataException(
+                            $"The first sparse chunk of {Path.GetFileName(smallPath)} runs past the end of the file.");
+                    if (newDataOffset < 0)
+                        throw new InvalidDataException("The first sparse chunk offset is negative.");
                 }
 
                 using (var src = new FileStream(smallPath, FileMode.Open, FileAccess.Read))
@@ -112,7 +132,9 @@ namespace Kirin_Tool.Utils
                     }
                 }
 
-                uint newTotalChunks = (hLarge.TotalChunks - 1) + (hSmall.TotalChunks - 1);
+                // Validated as >= 1 by ValidateHeader, so the subtraction cannot underflow into
+                // 0xFFFFFFFF (a "total_chunks=4294967295" image was still flashed into super, §1.2).
+                uint newTotalChunks = checked((uint)((long)hLarge.TotalChunks - 1 + hSmall.TotalChunks - 1));
                 using (var fs = new FileStream(outputPath, FileMode.Open, FileAccess.Write))
                 using (var writer = new BinaryWriter(fs))
                 {
@@ -127,6 +149,27 @@ namespace Kirin_Tool.Utils
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+        }
+
+        /// <summary>
+        /// Rejects a header whose geometry cannot describe a real file: the sparse version/sizes
+        /// are fixed, and a chunk count larger than the file is a hang (the merge loop walks every
+        /// declared chunk) as well as a sign of a corrupt image (audit 2026-11-15 round3 §1.2).
+        /// </summary>
+        private static void ValidateHeader(SparseHeader header, string path, long fileLength)
+        {
+            string name = Path.GetFileName(path);
+            if (header.FileHeaderSize != 28 || header.ChunkHeaderSize != SparseConstants.CHUNK_HEADER_SIZE)
+                throw new InvalidDataException(
+                    $"Sparse header of {name} declares FileHeaderSize={header.FileHeaderSize}/ChunkHeaderSize={header.ChunkHeaderSize}; expected 28/12.");
+            if (header.BlockSize == 0)
+                throw new InvalidDataException($"Sparse header of {name} declares BlockSize=0.");
+            if (header.TotalChunks == 0)
+                throw new InvalidDataException($"Sparse header of {name} declares 0 chunks.");
+            long maxChunks = (fileLength - header.FileHeaderSize) / SparseConstants.CHUNK_HEADER_SIZE;
+            if (header.TotalChunks > maxChunks)
+                throw new InvalidDataException(
+                    $"Sparse header of {name} declares {header.TotalChunks} chunks but the file can hold at most {maxChunks}.");
         }
 
         private static T ReadStruct<T>(BinaryReader reader) where T : struct

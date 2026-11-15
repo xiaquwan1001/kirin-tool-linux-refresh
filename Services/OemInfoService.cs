@@ -23,6 +23,7 @@ using System.IO;
 using System.Threading.Tasks;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services.Diagnostics;
+using Kirin_Tool.Utils;
 
 namespace Kirin_Tool.Services
 {
@@ -73,6 +74,9 @@ namespace Kirin_Tool.Services
                     {
                         read.Step("pull target: oeminfo -> " + _tempOemInfoPath);
                         pullResult = await _fastbootClient.PullOemInfo(_tempOemInfoPath);
+                        // Device identity fields: keep the pulled image 0600 while it exists
+                        // (audit 2026-11-15 round3 §4.2).
+                        if (File.Exists(_tempOemInfoPath)) PrivateWorkDirectory.RestrictFile(_tempOemInfoPath);
                         long pulledSize = OpLog.SizeOrUnknown(_tempOemInfoPath);
                         read.Step(OpLog.ResultStep("dump oeminfo", pullResult, pullResult.IsSuccess)
                             + " file=" + OpLog.FileStep(_tempOemInfoPath));

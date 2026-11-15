@@ -114,7 +114,12 @@ public abstract record ApprovalDecision
     /// <summary>Machine-readable token used in audits, JSON output and tests.</summary>
     public abstract string Code { get; }
 
-    public sealed record Approved(ApprovalScope Scope, bool Reused = false) : ApprovalDecision
+    /// <param name="TypedPhrase">
+    /// The phrase the operator actually typed, when the capability asked for one. The GUI gate
+    /// compares the typed text itself and records it here so an out-of-band face (MCP) can compare
+    /// the same string instead of trusting a boolean (audit 2026-11-15 round3 §2.2).
+    /// </param>
+    public sealed record Approved(ApprovalScope Scope, bool Reused = false, string? TypedPhrase = null) : ApprovalDecision
     {
         public override bool IsApproved => true;
         public override string Code => "approved";

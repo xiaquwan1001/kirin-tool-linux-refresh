@@ -11,7 +11,9 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Kirin_Tool.Services;
 using Kirin_Tool.Services.Approval;
+using Kirin_Tool.Utils;
 
 string root = Path.GetFullPath(args.Length == 0 ? "." : args[0]);
 int checks = 0;
@@ -713,6 +715,139 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
 
 stubEnvironment.Clear();
 try { Directory.Delete(stubDir, true); } catch { }
+
+// ---------------------------------------------------------------- M2/M3/M5: artifact hardening
+// These three parsers all take a file the user did not necessarily create, and all three feed a
+// device write: a bad super image is flashed into 'super', a mis-written OEMINFO image into
+// 'oeminfo', a flashing xml decides which host files are read. Refuse the bad input instead of
+// producing a half-valid artifact (audit 2026-11-15 round3 §1.2 / §1.3).
+{
+    byte[] Sparse(uint totalChunks, ushort fileHeaderSize, ushort chunkHeaderSize, uint blockSize, params uint[] chunkTotalSizes)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        writer.Write(0xed26ff3au); writer.Write((ushort)1); writer.Write((ushort)0);
+        writer.Write(fileHeaderSize); writer.Write(chunkHeaderSize); writer.Write(blockSize);
+        writer.Write(0u); writer.Write(totalChunks); writer.Write(0u);
+        foreach (uint totalSize in chunkTotalSizes)
+        {
+            writer.Write(0xcac1u); writer.Write((ushort)0); writer.Write(0u); writer.Write(totalSize);
+        }
+        return stream.ToArray();
+    }
+
+    string spoil = Path.Combine(Path.GetTempPath(), "kirin-sparse-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(spoil);
+    try
+    {
+        byte[] good = Sparse(1, 28, 12, 4096, 12u);
+        File.WriteAllBytes(Path.Combine(spoil, "good"), good);
+        var failures = new (string Label, byte[] Bad)[]
+        {
+            ("M2: FileHeaderSize != 28 is refused", Sparse(1, 27, 12, 4096, 12u)),
+            ("M2: ChunkHeaderSize != 12 is refused", Sparse(1, 28, 16, 4096, 12u)),
+            ("M2: BlockSize == 0 is refused", Sparse(1, 28, 12, 0, 12u)),
+            ("M2: total_chunks == 0 is refused (it used to produce 0xFFFFFFFF)", Sparse(0, 28, 12, 4096)),
+            ("M2: total_chunks beyond the file is refused", Sparse(0xFFFFFFFF, 28, 12, 4096, 12u)),
+            ("M2: a chunk TotalSize < 12 is refused", Sparse(1, 28, 12, 4096, 8u)),
+            ("M2: a chunk that runs past EOF is refused", Sparse(1, 28, 12, 4096, 4096u)),
+        };
+        foreach ((string label, byte[] bad) in failures)
+        {
+            string badPath = Path.Combine(spoil, "bad");
+            File.WriteAllBytes(badPath, bad);
+            bool refused = false;
+            var started = DateTime.UtcNow;
+            try { await SuperMerger.MergeSuperImages(Path.Combine(spoil, "good"), badPath, Path.Combine(spoil, "merged")); }
+            catch (Exception) { refused = true; }
+            Check(refused, label);
+            Check((DateTime.UtcNow - started).TotalSeconds < 5,
+                "M2: the refusal is immediate, not a walk over the declared chunk count (" + (DateTime.UtcNow - started).TotalSeconds.ToString("0.00") + "s)");
+        }
+    }
+    finally { try { Directory.Delete(spoil, true); } catch { } }
+
+    // M3: OEMINFO model/vendor bounds. Block = 0x400, payload at 0x200.
+    byte[] OemInfoImage()
+    {
+        var data = new byte[2 * 0x400];
+        for (int block = 0; block < 2; block++)
+        {
+            Encoding.ASCII.GetBytes("OEM_INFO").CopyTo(data, block * 0x400);
+            BitConverter.GetBytes(6).CopyTo(data, block * 0x400 + 8);
+            BitConverter.GetBytes(block == 0 ? 0x5b : 0x12).CopyTo(data, block * 0x400 + 12);
+        }
+        return data;
+    }
+
+    var editor = new Kirin_Tool.Services.OemInfoEditor(OemInfoImage());
+    byte[] edited = editor.EditEntries("NOH-AN00", "hw-cn");
+    Check(BitConverter.ToInt32(edited, 20) == 8 && Encoding.ASCII.GetString(edited, 0x200, 8) == "NOH-AN00",
+        "M3: a normal model is written with its length prefix into the first block");
+    Check(BitConverter.ToInt32(edited, 0x400 + 20) == 5 && Encoding.ASCII.GetString(edited, 0x400 + 0x200, 5) == "hw-cn",
+        "M3: a normal vendor value lands in its own block");
+    Check(edited[^1] == 0xFF, "M3: the block padding is still filled with 0xFF");
+
+    foreach ((string value, string label) in new[]
+    {
+        (new string('A', 65), "M3: a 65-character model is refused"),
+        ("", "M3: an empty model is refused"),
+        ("bad\u0001model", "M3: a control character in the model is refused"),
+    })
+    {
+        bool refused = false;
+        try { editor.EditEntries(value, "hw-cn"); } catch (InvalidDataException) { refused = true; }
+        Check(refused, label);
+    }
+    bool vendorRefused = false;
+    try { editor.EditEntries("NOH-AN00", new string('B', 65)); } catch (InvalidDataException) { vendorRefused = true; }
+    Check(vendorRefused, "M3: a 65-character vendor value is refused before anything is written");
+
+    // The block-level guard itself: a payload longer than the 512-byte block field must throw
+    // instead of overwriting the next block's OEM_INFO header.
+    var updateEntry = typeof(Kirin_Tool.Services.OemInfoEditor).GetMethod("UpdateEntry", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    byte[] before = OemInfoImage();
+    bool overflowRefused = false;
+    try { updateEntry.Invoke(editor, new object[] { before, 0, new string('C', 0x201) }); }
+    catch (TargetInvocationException ex) when (ex.InnerException is InvalidDataException) { overflowRefused = true; }
+    Check(overflowRefused, "M3: a payload larger than one block's payload area is refused");
+    Check(Enumerable.Range(0, 8).All(i => before[0x400 + i] == (byte)"OEM_INFO"[i]),
+        "M3: the next block's magic is untouched after the refused write");
+
+    // M5: flashing xml — no DTD, and image paths stay inside the package directory.
+    string xmlDir = Path.Combine(Path.GetTempPath(), "kirin-flashxml-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(Path.Combine(xmlDir, "fastbootimage"));
+    try
+    {
+        File.WriteAllBytes(Path.Combine(xmlDir, "fastbootimage", "BOOT.img"), new byte[] { 1, 2, 3 });
+        var flashing = new FastbootFlasherService(new FastbootClient(Path.Combine(xmlDir, "unused-fastboot")));
+
+        string okXml = Path.Combine(xmlDir, "ok.xml");
+        File.WriteAllText(okXml, "<configurations><configuration><fastbootimage><image name=\"BOOT\" identifier=\"boot\">fastbootimage/BOOT.img</image></fastbootimage></configuration></configurations>");
+        var parsed = flashing.ParseFlashingXml(okXml);
+        Check(parsed.Count == 1 && parsed[0].DumpPath == Path.Combine(xmlDir, "fastbootimage", "BOOT.img"),
+            "M5: a relative image inside the package still resolves as before");
+
+        string escapeXml = Path.Combine(xmlDir, "escape.xml");
+        File.WriteAllText(escapeXml, "<configurations><configuration><fastbootimage><image name=\"X\" identifier=\"boot\">../../etc/shadow</image></fastbootimage></configuration></configurations>");
+        bool escapeRefused = false;
+        try { flashing.ParseFlashingXml(escapeXml); } catch (InvalidDataException) { escapeRefused = true; }
+        Check(escapeRefused, "M5: an image path escaping the package directory is refused");
+
+        string absoluteXml = Path.Combine(xmlDir, "absolute.xml");
+        File.WriteAllText(absoluteXml, "<configurations><configuration><fastbootimage><image name=\"X\" identifier=\"boot\">/etc/shadow</image></fastbootimage></configuration></configurations>");
+        bool absoluteRefused = false;
+        try { flashing.ParseFlashingXml(absoluteXml); } catch (InvalidDataException) { absoluteRefused = true; }
+        Check(absoluteRefused, "M5: an absolute image path outside the package directory is refused");
+
+        string dtdXml = Path.Combine(xmlDir, "dtd.xml");
+        File.WriteAllText(dtdXml, "<!DOCTYPE configurations [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><configurations><configuration><fastbootimage><image name=\"X\" identifier=\"boot\">&xxe;</image></fastbootimage></configuration></configurations>");
+        bool dtdRefused = false;
+        try { flashing.ParseFlashingXml(dtdXml); } catch (Exception) { dtdRefused = true; }
+        Check(dtdRefused, "M5: a flashing xml with a DTD/entity is refused instead of resolving it");
+    }
+    finally { try { Directory.Delete(xmlDir, true); } catch { } }
+}
 
 Console.WriteLine(checks + " write gate checks passed.");
 

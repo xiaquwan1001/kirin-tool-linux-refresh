@@ -238,8 +238,10 @@ internal static class OtaFlashRunner
             op.Step(OpLog.DegradedPrefix + "plan warning: " + warning);
         // A merged retail super image is ~6.5 GB; /tmp is tmpfs on many distros, so the
         // caller decides where the staging directory lives (default: next to the payload).
-        string tempDirectory = Path.Combine(workDirectory, DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-        Directory.CreateDirectory(tempDirectory);
+        // Random suffix: a second-granularity name under a shared --work-dir (e.g. /tmp) could be
+        // pre-created by another local user to hijack the staging writes (audit §4.2).
+        string tempDirectory = PrivateWorkDirectory.Create(
+            DateTime.Now.ToString("yyyyMMdd_HHmmss"), workDirectory);
 
         try
         {
@@ -367,11 +369,46 @@ internal static class OtaFlashRunner
         if (magic[0] != 0x1f || magic[1] != 0x8b) return path;
 
         string output = Path.Combine(tempDirectory, Path.GetFileNameWithoutExtension(path) + ".raw");
-        await using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-        await using (var gzip = new GZipStream(input, CompressionMode.Decompress))
-        await using (var outputStream = new FileStream(output, FileMode.Create, FileAccess.Write))
+
+        // A gzip payload has no declared output size, so a few MB of input can expand to hundreds
+        // of gigabytes. Bound the extraction by 32x the compressed size (minimum 512 MB) and by the
+        // free space of the staging filesystem: over the limit the partition fails loudly with a
+        // file we delete, instead of filling the disk or a tmpfs (audit 2026-11-15 round3 §1.2).
+        const int chunk = 1 << 20;
+        long compressedLength = new FileInfo(path).Length;
+        long freeSpace;
+        try { freeSpace = new DriveInfo(Path.GetFullPath(tempDirectory)).AvailableFreeSpace; }
+        catch (Exception) { freeSpace = long.MaxValue; }
+        long limit = Math.Min(freeSpace, Math.Max(512L * chunk, compressedLength * 32));
+        long written = 0;
+
+        try
         {
-            await gzip.CopyToAsync(outputStream, 1 << 20, cancellationToken);
+            await using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await using (var gzip = new GZipStream(input, CompressionMode.Decompress))
+            await using (var outputStream = new FileStream(output, FileMode.Create, FileAccess.Write))
+            {
+                byte[] buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(chunk);
+                try
+                {
+                    int read;
+                    while ((read = await gzip.ReadAsync(buffer.AsMemory(0, chunk), cancellationToken)) > 0)
+                    {
+                        written += read;
+                        if (written > limit)
+                            throw new InvalidDataException(
+                                "gzip payload expands beyond the extraction limit (" + TextFormat.Bytes(limit)
+                                + " = min(free space, max(512 MiB, 32x compressed)); refusing to decompress further");
+                        await outputStream.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    }
+                }
+                finally { System.Buffers.ArrayPool<byte>.Shared.Return(buffer); }
+            }
+        }
+        catch
+        {
+            try { File.Delete(output); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            throw;
         }
         context.Diag($"    gzip payload decompressed -> {TextFormat.Bytes(new FileInfo(output).Length)}");
         try { File.Delete(path); } catch { }

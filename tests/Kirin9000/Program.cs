@@ -91,6 +91,65 @@ try {
 combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi980")==true);Dispatcher.UIThread.RunJobs();
 Check(!owner.FindControl<Border>("Kirin9000Notice")!.IsVisible,"switching back clears experimental notice");
 
+// ------------------------------------------------- S3: Convert OEM direct branch is a gated write
+// The hisi710/710a/810/820/970/980/985/990 branch of BtnConvertOem_Click used to send
+// oeminfoerase-disablewp / oeminfowrite-KTModel@… / oeminfowrite-KTVendor@… with no approval and
+// no write-identity gate (audit 2026-11-15 round3 §3.1). It now asks the same redline capability
+// as the flash path and sends everything through DeviceWriteOps.
+{
+ string oemDir=Path.Combine(Path.GetTempPath(),"kirin9000-oem-"+Guid.NewGuid().ToString("N"));
+ Directory.CreateDirectory(oemDir);
+ void PumpOem(Func<bool> ready,int seconds=45) {var until=DateTime.UtcNow.AddSeconds(seconds);while(!ready()){Dispatcher.UIThread.RunJobs();if(DateTime.UtcNow>until)throw new Exception("S3 oeminfo flow timed out; owned windows: ["+string.Join(", ",owner.OwnedWindows.Select(w=>w.GetType().Name+":"+w.Title))+"]");Thread.Sleep(10);}Dispatcher.UIThread.RunJobs();}
+ try {
+  string oemCalls=Path.Combine(oemDir,"calls"), oemStub=Path.Combine(oemDir,"fake-fastboot");
+  string[] oemScript = {
+   "#!/usr/bin/python3",
+   "import sys,json",
+   "args=sys.argv[1:]",
+   "open(" + System.Text.Json.JsonSerializer.Serialize(oemCalls) + ",'a').write(json.dumps(args)+'\\n')",
+   "if args==['devices']:",
+   "    print('TEST fastboot')",
+   "elif args[:1]==['getvar']:",
+   "    print('(bootloader) product: NOH-AN00')",
+   "else:",
+   "    print('OKAY')",
+  };
+  File.WriteAllText(oemStub,string.Join((char)10,oemScript));
+  if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(oemStub,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+  typeof(MainWindow).GetField("_fastbootClient",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(owner,new FastbootClient(oemStub));
+  combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi990")==true);Dispatcher.UIThread.RunJobs();
+  owner.FindControl<TextBox>("TxtDeviceModel")!.Text="NOH-AN00";
+  owner.FindControl<TextBox>("TxtVendor")!.Text="hw-cn";
+  File.WriteAllText(oemCalls,"");
+  typeof(MainWindow).GetMethod("BtnConvertOem_Click",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(owner,[new Button(),new RoutedEventArgs(Button.ClickEvent)]);
+  PumpOem(()=>owner.OwnedWindows.Any(w=>w.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true));
+  var oemApproval=owner.OwnedWindows.Single(w=>w.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true);
+  Check(oemApproval.Title!.Contains("oeminfo-flash"),"S3: the direct oeminfo write asks the oeminfo-flash capability, not a silent command");
+  var oemApprove=oemApproval.GetVisualDescendants().OfType<Button>().Single(b=>b.Content?.ToString()=="Approve once");
+  Check(!oemApprove.IsEnabled,"S3: the approve button stays locked until the confirm phrase is typed");
+  var sentBeforeApproval=File.Exists(oemCalls)?File.ReadAllLines(oemCalls):Array.Empty<string>();
+  Check(!sentBeforeApproval.Any(line=>line.Contains("oeminfowrite")||line.Contains("oeminfoerase")),
+   "S3: no oeminfo command reaches the loader before the human approves");
+  oemApproval.GetVisualDescendants().OfType<TextBox>().First().Text="I UNDERSTAND oeminfo-flash";
+  Dispatcher.UIThread.RunJobs();
+  Check(oemApprove.IsEnabled,"S3: typing the per-capability phrase unlocks the approve button");
+  oemApprove.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Dispatcher.UIThread.RunJobs();
+  PumpOem(()=>owner.OwnedWindows.OfType<Kirin_Tool.UI.ProgressDialog>().Any());
+  var oemProgress=owner.OwnedWindows.OfType<Kirin_Tool.UI.ProgressDialog>().Single();
+  PumpOem(()=>oemProgress.FindControl<Button>("CloseButton")!.IsVisible);
+  var oemArgv=File.ReadAllLines(oemCalls).Select(line=>System.Text.Json.JsonSerializer.Deserialize<string[]>(line)!).ToArray();
+  var oemCommands=oemArgv.Where(a=>a.Length>0&&a[0]=="oem").Select(a=>a[1]).ToArray();
+  Check(oemCommands.SequenceEqual(new[]{"oeminfoerase-disablewp","oeminfowrite-KTModel@NOH-AN00","oeminfowrite-KTVendor@hw-cn"}),
+   "S3: the three field writes are still sent, in the same order, as 'oem <cmd>' (" + string.Join(", ",oemCommands) + ")");
+  Check(oemArgv.Any(a=>a.Length>1&&a[0]=="getvar"&&a[1]=="product"),
+   "S3: the write-identity gate probed the device (getvar product) before the first oem write");
+  string oemStatus=oemProgress.FindControl<TextBlock>("OverallStatusTextBlock")?.Text??"";
+  Check(oemStatus.Contains("Both oeminfowrite commands",StringComparison.Ordinal)&&(oemProgress.Title??"").Contains("Write Complete",StringComparison.Ordinal),
+   "S3: success is still judged by the loader's OKAY (" + oemStatus.Trim() + ")");
+  oemProgress.Close();Dispatcher.UIThread.RunJobs();
+ } finally { try{Directory.Delete(oemDir,true);}catch{} }
+}
+
 // ------------------------------------------------- R2: closing the window cancels the operation
 // The 2026-11-15 orphan: the GUI exited while a fastboot child kept running for four minutes.
 // Here a stub fastboot dumps "forever"; closing the window must cancel the operation, kill the

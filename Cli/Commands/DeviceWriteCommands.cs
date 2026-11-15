@@ -482,9 +482,12 @@ internal sealed class UsbTestpointCommand : GatedDeviceWriteCommand
 
         // No interactive retry channel in the CLI: a VCOM retry prompt that nobody can answer would
         // hang automation, so the callback refuses and the service throws with its own message.
+        // Random + 0700: the old fixed /tmp/kirin-tool-dload could be pre-created (and planted
+        // with symlinks) by another local user before the tool ran (audit §4.1).
+        string testpointDirectory = Kirin_Tool.Utils.PrivateWorkDirectory.Create("kirin-tool-dload");
         var testpoint = new Services.USBUpdate.SoftwareTestpointService(
             message => context.Diag("testpoint: " + message),
-            Path.Combine(Path.GetTempPath(), "kirin-tool-dload"),
+            testpointDirectory,
             session.Client,
             (title, message) =>
             {
@@ -514,6 +517,12 @@ internal sealed class UsbTestpointCommand : GatedDeviceWriteCommand
             return WriteResult(context, Name, CapabilityId,
                 WriteReports.Failed(failure, ExitCodes.DeviceRejected, "testpoint transfer failed: " + ex.Message),
                 "testpoint transfer FAILED: " + ex.Message);
+        }
+        finally
+        {
+            // Per-run private scratch: remove it so it does not pile up in the temp directory
+            // (the service also cleans it when it starts).
+            try { Directory.Delete(testpointDirectory, true); } catch (Exception) { }
         }
 
         // No exception means the channel verified the write: the verdict, not the absence of an

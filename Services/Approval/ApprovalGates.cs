@@ -32,7 +32,9 @@ public abstract class ApprovalGateBase : IApprovalGate
 
         // Same capability + same session + same argv + same targets => the human already answered
         // this exact question. Reuse it instead of prompting again (idempotency, test ⑥).
-        if (_cache != null && _cache.TryReuse(request.Fingerprint))
+        // A typed-confirm (redline) approval is never reused: the phrase is a per-operation decision
+        // and a cached "yes" would let a second identical write skip the human (audit §2.2/§3.1).
+        if (!request.RequiresTypedConfirm && _cache != null && _cache.TryReuse(request.Fingerprint))
             return Record(request, new ApprovalDecision.Approved(ApprovalScope.Once, Reused: true), reused: true, typedConfirm: false);
 
         ApprovalAttempt attempt = await DecideAsync(request, cancellationToken).ConfigureAwait(false);
@@ -113,9 +115,10 @@ public sealed class GuiApprovalGate : ApprovalGateBase
             {
                 case ApprovalPromptOutcome.Approved:
                 case ApprovalPromptOutcome.ApprovedForSession:
+                    string? typed = null;
                     if (request.RequiresTypedConfirm)
                     {
-                        string typed = (answer.TypedConfirm ?? "").Trim();
+                        typed = (answer.TypedConfirm ?? "").Trim();
                         if (!string.Equals(typed, request.ConfirmPhrase, StringComparison.Ordinal))
                         {
                             return new ApprovalAttempt(new ApprovalDecision.Denied(
@@ -123,7 +126,10 @@ public sealed class GuiApprovalGate : ApprovalGateBase
                         }
                     }
                     return new ApprovalAttempt(
-                        new ApprovalDecision.Approved(answer.Outcome == ApprovalPromptOutcome.ApprovedForSession ? ApprovalScope.Session : ApprovalScope.Once),
+                        new ApprovalDecision.Approved(
+                            answer.Outcome == ApprovalPromptOutcome.ApprovedForSession ? ApprovalScope.Session : ApprovalScope.Once,
+                            Reused: false,
+                            TypedPhrase: typed),
                         TypedConfirm: request.RequiresTypedConfirm);
 
                 case ApprovalPromptOutcome.TimedOut:
@@ -197,7 +203,8 @@ public sealed class CliApprovalGate : ApprovalGateBase
                 "write refused: confirm phrase mismatch ('" + request.ConfirmPhrase + "' expected)", 4)));
         }
 
-        return Task.FromResult(new ApprovalAttempt(new ApprovalDecision.Approved(ApprovalScope.Once), TypedConfirm: true));
+        return Task.FromResult(new ApprovalAttempt(
+            new ApprovalDecision.Approved(ApprovalScope.Once, Reused: false, TypedPhrase: typed), TypedConfirm: true));
     }
 }
 
@@ -237,24 +244,57 @@ public sealed class McpApprovalGate : ApprovalGateBase
         {
             try
             {
-                GuiApprovalAnswer answer = await _bridge.RequestApprovalAsync(request, token).ConfigureAwait(false);
+                GuiApprovalResult result = await _bridge.RequestApprovalAsync(request, token).ConfigureAwait(false);
+                GuiApprovalAnswer answer = result.Answer;
                 return answer.Outcome switch
                 {
-                    ApprovalPromptOutcome.Approved => new ApprovalAttempt(
-                        new ApprovalDecision.Approved(answer.Scope == ApprovalScope.Session ? ApprovalScope.Session : ApprovalScope.Once), answer.TypedConfirm),
-                    ApprovalPromptOutcome.ApprovedForSession => new ApprovalAttempt(new ApprovalDecision.Approved(ApprovalScope.Session), answer.TypedConfirm),
+                    // An approval is only usable when the channel was authenticated by the kernel
+                    // (peer uid == this uid) and, for a redline request, when the operator's typed
+                    // phrase is the one this capability asks for. A bare "TypedConfirm: true" from
+                    // the other end is not evidence that a human typed anything (§2.1/§2.2).
+                    ApprovalPromptOutcome.Approved or ApprovalPromptOutcome.ApprovedForSession =>
+                        CheckApprovalAnswer(request, answer, result.PeerVerified),
                     ApprovalPromptOutcome.TimedOut => new ApprovalAttempt(new ApprovalDecision.TimedOut(request.Timeout)),
                     _ => new ApprovalAttempt(new ApprovalDecision.Denied(answer.Reason ?? "denied by the operator in the GUI")),
                 };
             }
-            catch (GuiNotRunningException)
+            catch (GuiNotRunningException ex)
             {
                 return new ApprovalAttempt(new ApprovalDecision.NotSupported(
                     "mcp",
-                    "a human approval is required for '" + request.CapabilityId + "' but the GUI is not running. " +
-                    "Start the GUI and approve the prompt there, or run the CLI with --yes" +
+                    "a human approval is required for '" + request.CapabilityId + "' but no authenticated GUI is reachable (" +
+                    ex.Message + "). Start the GUI and approve the prompt there, or run the CLI with --yes" +
                     (request.RequiresTypedConfirm ? " --allow-redline" : "") + "."));
             }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Turns a GUI answer into a decision, refusing anything the channel did not prove: the peer
+    /// must be this user, and a redline request must come back with the exact confirm phrase.
+    /// </summary>
+    private static ApprovalAttempt CheckApprovalAnswer(ApprovalRequest request, GuiApprovalAnswer answer, bool peerVerified)
+    {
+        ApprovalScope scope = answer.Outcome == ApprovalPromptOutcome.ApprovedForSession
+            ? ApprovalScope.Session
+            : answer.Scope == ApprovalScope.Session ? ApprovalScope.Session : ApprovalScope.Once;
+
+        if (!peerVerified)
+        {
+            return new ApprovalAttempt(new ApprovalDecision.Denied(
+                "the approval channel could not be authenticated (peer uid check failed); nothing was approved"));
+        }
+
+        if (request.RequiresTypedConfirm)
+        {
+            string typed = (answer.TypedPhrase ?? "").Trim();
+            if (!answer.TypedConfirm || !string.Equals(typed, request.ConfirmPhrase, StringComparison.Ordinal))
+            {
+                return new ApprovalAttempt(new ApprovalDecision.Denied(
+                    "confirm phrase mismatch: the GUI did not return '" + request.ConfirmPhrase + "' for this request"));
+            }
+        }
+
+        return new ApprovalAttempt(new ApprovalDecision.Approved(scope), TypedConfirm: request.RequiresTypedConfirm);
     }
 }

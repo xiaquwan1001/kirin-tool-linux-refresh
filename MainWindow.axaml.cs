@@ -1864,11 +1864,15 @@ namespace Kirin_Tool
                     ApprovalDecision decision = await ApprovalGates.Current.RequestAsync(request, cancellationToken);
                     return decision switch
                     {
+                        // TypedPhrase carries what the operator actually typed (the GUI gate
+                        // already compared it with request.ConfirmPhrase); the MCP gate compares
+                        // the same string itself instead of trusting a bare boolean (§2.2).
                         ApprovalDecision.Approved approved => new GuiApprovalAnswer(
                             approved.Scope == ApprovalScope.Session ? ApprovalPromptOutcome.ApprovedForSession : ApprovalPromptOutcome.Approved,
                             TypedConfirm: request.RequiresTypedConfirm,
                             Reason: null,
-                            Scope: approved.Scope),
+                            Scope: approved.Scope,
+                            TypedPhrase: approved.TypedPhrase),
                         ApprovalDecision.TimedOut => new GuiApprovalAnswer(ApprovalPromptOutcome.TimedOut),
                         ApprovalDecision.Denied denied => new GuiApprovalAnswer(ApprovalPromptOutcome.Denied, false, denied.Reason),
                         ApprovalDecision.NotSupported notSupported => new GuiApprovalAnswer(ApprovalPromptOutcome.Denied, false, notSupported.Instruction),
@@ -2627,6 +2631,40 @@ namespace Kirin_Tool
                     return;
                 }
 
+                bool shouldDisableWp = (selectedCpu == "hisi980" && UseFastFlashLoaderSwitch.IsChecked == true) ||
+                                       selectedCpu == "hisi810" ||
+                                       selectedCpu == "hisi820" ||
+                                       selectedCpu == "hisi985" ||
+                                       selectedCpu == "hisi990";
+
+                // This branch sends three irreversible loader commands straight at the oeminfo
+                // fields. It used to skip both the approval gate and the write-identity gate
+                // (audit 2026-11-15 round3 §3.1): the capability is the same redline one the
+                // flash path uses (oeminfo holds model/region/identity), so it asks for the same
+                // ticket and the DeviceWriteOps calls below run EnsureWritableIdentityAsync().
+                ApprovalAdmission? admission = await RequestGuiApprovalAsync(ApprovalRequests.For(
+                    "oeminfo-flash",
+                    argv: new[]
+                    {
+                        "fastboot", "oem", shouldDisableWp ? "oeminfoerase-disablewp" : "(write protection left untouched)",
+                        "oem", "oeminfowrite-KTModel@<model>", "oem", "oeminfowrite-KTVendor@<vendor>",
+                    },
+                    targets: new[] { "oeminfo" },
+                    summary: new[]
+                    {
+                        "writes the device model and region/vendor fields over the loader (oeminfowrite-KTModel / KTVendor)",
+                        shouldDisableWp
+                            ? "first removes the oeminfo write protection (oeminfoerase-disablewp)"
+                            : "the oeminfo write protection is left untouched on this CPU path",
+                        "oeminfo is a redline partition: its HMAC is keyed by device secrets and cannot be recomputed offline",
+                        "a wrong model/vendor cannot be undone by this tool - it needs a full package or the rescue path",
+                    }));
+                if (admission == null)
+                {
+                    await ShowMessageBox("Write Cancelled", "The oeminfo field write was cancelled at the approval gate; nothing was written.");
+                    return;
+                }
+
                 try
                 {
                     var progressDialog = new ProgressDialog(new ObservableCollection<ProgressItemViewModel>(new[]
@@ -2637,22 +2675,20 @@ namespace Kirin_Tool
 
                     var dialogTask = _dialogService.ShowDialog(progressDialog);
 
-                    bool shouldDisableWp = (selectedCpu == "hisi980" && UseFastFlashLoaderSwitch.IsChecked == true) ||
-                                           selectedCpu == "hisi810" ||
-                                           selectedCpu == "hisi820" ||
-                                           selectedCpu == "hisi985" ||
-                                           selectedCpu == "hisi990";
+                    // One ticket for this operation: it is bound to 'oeminfo-flash' and the ops
+                    // below refuse to run without it (compiler-enforced, not a review habit).
+                    WriteTicket ticket = admission.RequireTicket();
                     if (shouldDisableWp)
                     {
                         progressDialog.UpdateOverallStatus("Disabling write protection...");
-                        await _fastbootClient.OemCommandAsync("oeminfoerase-disablewp");
+                        await _deviceWriteOps.OemInfoEraseWriteProtectionAsync(ticket);
                     }
 
                     progressDialog.UpdateOverallStatus($"Writing model: {model}...");
                     progressDialog.ProgressItems[0].StatusText = "Writing...";
                     progressDialog.ProgressItems[0].ProgressValue = 50;
 
-                    var modelResult = await _fastbootClient.OemCommandAsync($"oeminfowrite-KTModel@{model}");
+                    var modelResult = await _deviceWriteOps.OemInfoWriteFieldAsync(ticket, "KTModel", model);
                     var modelOutcome = ClassifyCommandOutput(modelResult);
                     bool modelSuccess = modelOutcome == CommandOutcome.Succeeded;
 
@@ -2673,7 +2709,7 @@ namespace Kirin_Tool
                     progressDialog.ProgressItems[1].StatusText = "Writing...";
                     progressDialog.ProgressItems[1].ProgressValue = 50;
 
-                    var vendorResult = await _fastbootClient.OemCommandAsync($"oeminfowrite-KTVendor@{vendor}");
+                    var vendorResult = await _deviceWriteOps.OemInfoWriteFieldAsync(ticket, "KTVendor", vendor);
                     var vendorOutcome = ClassifyCommandOutput(vendorResult);
                     bool vendorSuccess = vendorOutcome == CommandOutcome.Succeeded;
 
