@@ -717,8 +717,11 @@ namespace Kirin_Tool
             try
             {
                 SetProgressDialogOperation(progressDialog, "Backing up identity partitions (pre-op backup)...");
+                // 每次按当前字段新建 service：字段 _xmlFastbootClient 在构造时被 service 捕获，
+                // 测试/诊断替换该字段后旧实例仍然指向真实 fastboot 二进制，于是「无设备」的 GUI
+                // 测试会真的去调用 fastboot（2026-11-15 17:41 y700 误伤的成因之一）。
                 var backup = new PreOpBackup(
-                    _fastbootFlasherService,
+                    new FastbootFlasherService(_xmlFastbootClient),
                     async variable =>
                     {
                         try { return await _fastbootClient.GetVarAsync(variable); }
