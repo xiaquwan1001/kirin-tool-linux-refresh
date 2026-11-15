@@ -281,8 +281,13 @@ public sealed class GuiApprovalServer : IDisposable
         try
         {
             string? directory = Path.GetDirectoryName(_socketPath);
-            if (!string.IsNullOrEmpty(directory))
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
             {
+                // Only a directory this process creates is ours to tighten. A pre-existing one
+                // (the default per-uid directory, or an operator/test supplied path such as one
+                // under /tmp) is left as it is: chmod'ing a directory we do not own fails with
+                // EPERM, and tightening a shared directory to 0700 would break every other user.
+                // The boundary is the 0600 socket entry below plus the kernel-reported peer uid.
                 Directory.CreateDirectory(directory);
                 if (!OperatingSystem.IsWindows())
                     File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
