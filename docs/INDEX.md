@@ -47,7 +47,8 @@ Every link below is checked with `ls` (no dead entries; `docs/audit/` is a direc
 
 | Guide | What it covers |
 | :--- | :--- |
-| [release-notes/v2.4.19.md](release-notes/v2.4.19.md) | Current release: batch B+ — the hand-rolled `INotifyPropertyChanged` in four windows stops shadowing `AvaloniaObject.PropertyChanged`; a headless assertion now guards the notification path. |
+| [release-notes/v2.4.20.md](release-notes/v2.4.20.md) | Current release: pre-write identity gate, VCOM port uniqueness, explicit `-s <SN>` — a loader that answers `OKAY` instead of a model name can no longer receive a write, and two same-VID/PID devices are refused instead of guessed. |
+| [release-notes/v2.4.19.md](release-notes/v2.4.19.md) | Previous release (warning cleanup B+): batch B+ — the hand-rolled `INotifyPropertyChanged` in four windows stops shadowing `AvaloniaObject.PropertyChanged`; a headless assertion now guards the notification path. |
 | [release-notes/v2.4.18.md](release-notes/v2.4.18.md) | Previous release: nullable-reference cleanup (batch B) — 0 compiler warnings, nullable codes gated tree-wide. |
 | [fork-release.md](fork-release.md) | Fork release pipeline: deb / AppImage / tar.gz / CLI assets, deb layout, ICU/OpenSSL dependency policy, CI map. |
 | [portable-appimage.md](portable-appimage.md) | AppImage build baseline, glibc 2.31, host dependencies, udev onboarding. |

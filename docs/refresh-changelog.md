@@ -10,6 +10,7 @@ not pulled from upstream.
 
 | Version | Theme | One-line result |
 | :--- | :--- | :--- |
+| v2.4.20 | multi-device write safety (audit 2026-11-15) | pre-write identity gate (`getvar product` that answers `OKAY` refuses the write, verdict `device-identity`), VCOM ports grouped per physical USB device (two devices → refuse, one device with ttyUSB0..3 unchanged), explicit `-s <SN>` on the spawned command line; no chip whitelist, no wire/timing change |
 | v2.4.9 | first self-published release | deb + AppImage + tar.gz + single-file CLI, all from one commit, with install-level smoke checks |
 | v2.4.10 | GUI quality of life | remembers last CPU model / files / folders, light + dark theme |
 | v2.4.11 | .NET 10 migration, packaging fix, unlock/redline behaviour | packages install on modern Ubuntu again |
