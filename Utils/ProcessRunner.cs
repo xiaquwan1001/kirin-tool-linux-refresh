@@ -19,6 +19,7 @@
  */
 
 using Kirin_Tool.Models;
+using Kirin_Tool.Services;
 using Kirin_Tool.Services.Diagnostics;
 using System.Diagnostics;
 using System.Threading.Tasks;
@@ -56,7 +57,11 @@ namespace Kirin_Tool.Utils
             AppDomain.CurrentDomain.UnhandledException += (_, __) => KillLiveChildren();
         }
 
-        private static void KillLiveChildren()
+        /// <summary>
+        /// Kill every child this process still has running. Called from the process-exit hooks and
+        /// from <see cref="OperationCancellation.CancelAll"/> (window close, R2).
+        /// </summary>
+        internal static void KillLiveChildren()
         {
             List<Process> snapshot;
             lock (LiveLock)
@@ -160,6 +165,14 @@ namespace Kirin_Tool.Utils
             using var scope = OperationLogger.Begin(operation, tool, argv);
             scope.Step("exec " + executablePath);
 
+            // R2: a window that is already closing must not spawn one more child.
+            if (OperationCancellation.Token.IsCancellationRequested)
+            {
+                string cancelledBeforeLaunch = "operation cancelled before launch (the window is closing)";
+                scope.Result(false, null, null, null, cancelledBeforeLaunch, "cancelled", "refused before launch");
+                throw new OperationCanceledException(cancelledBeforeLaunch);
+            }
+
             using var process = new Process { StartInfo = processStartInfo };
             try
             {
@@ -188,7 +201,10 @@ namespace Kirin_Tool.Utils
             }
 
             var timeout = timeoutSeconds > 0 ? TimeSpan.FromSeconds(timeoutSeconds) : TimeSpan.FromMinutes(timeoutMinutes);
-            using var cts = new CancellationTokenSource(timeout);
+            // R2: the child is killed when either the command times out or the host operation is
+            // cancelled (window close). Both paths kill the whole tree; only the verdict differs.
+            using var timeoutSource = new CancellationTokenSource(timeout);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(timeoutSource.Token, OperationCancellation.Token);
             var stopwatch = Stopwatch.StartNew();
 
             try
@@ -233,9 +249,19 @@ namespace Kirin_Tool.Utils
             }
             catch (OperationCanceledException)
             {
-                // Kill the whole tree so child processes do not outlive the timeout.
-                process.Kill(entireProcessTree: true);
+                // Kill the whole tree so child processes do not outlive the timeout or a close.
+                try { process.Kill(entireProcessTree: true); } catch (Exception) { /* already gone */ }
                 process.WaitForExit(3000);
+
+                if (OperationCancellation.IsCancellationRequested)
+                {
+                    WriteLog(executablePath, arguments, "[Cancelled: the host operation was cancelled; the process tree was killed]");
+                    scope.Result(false, null, stopwatch.ElapsedMilliseconds, null, null, "cancelled",
+                        "operation cancelled by the host (window close or user cancel); child process tree killed");
+                    throw new OperationCanceledException(
+                        "operation cancelled by the host; the child process tree was killed");
+                }
+
                 WriteLog(executablePath, arguments, $"[Process Timed Out after {timeout.TotalSeconds} seconds]");
                 scope.Result(false, null, stopwatch.ElapsedMilliseconds, null, null, "timeout", $"process timed out after {timeout.TotalSeconds:F0} seconds");
                 throw new TimeoutException($"Process timed out after {timeout.TotalSeconds:F0} seconds");

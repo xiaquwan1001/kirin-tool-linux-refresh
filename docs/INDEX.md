@@ -47,7 +47,8 @@ Every link below is checked with `ls` (no dead entries; `docs/audit/` is a direc
 
 | Guide | What it covers |
 | :--- | :--- |
-| [release-notes/v2.4.21.md](release-notes/v2.4.21.md) | Current release: the GUI pre-op backup builds its fastboot service from the client currently installed in the window, so a replaced client is honoured and a headless harness can no longer spawn the real fastboot binary (2.4.20 remains the identity-gate / VCOM-uniqueness / explicit `-s` release). |
+| [release-notes/v2.4.22.md](release-notes/v2.4.22.md) | Current release: the identity gate now also covers the read path (`oem dump-emmc`/`dump-storage`/`fetch`), a window close cancels the running operation and kills its fastboot child tree, Windows VCOM ports are grouped by physical USB device (two devices → refuse), and a fallback to the system `fastboot` is a `degraded` field of every CLI/MCP result. |
+| [release-notes/v2.4.21.md](release-notes/v2.4.21.md) | Previous release: the GUI pre-op backup builds its fastboot service from the client currently installed in the window, so a replaced client is honoured and a headless harness can no longer spawn the real fastboot binary. |
 | [release-notes/v2.4.19.md](release-notes/v2.4.19.md) | Previous release (warning cleanup B+): batch B+ — the hand-rolled `INotifyPropertyChanged` in four windows stops shadowing `AvaloniaObject.PropertyChanged`; a headless assertion now guards the notification path. |
 | [release-notes/v2.4.18.md](release-notes/v2.4.18.md) | Previous release: nullable-reference cleanup (batch B) — 0 compiler warnings, nullable codes gated tree-wide. |
 | [fork-release.md](fork-release.md) | Fork release pipeline: deb / AppImage / tar.gz / CLI assets, deb layout, ICU/OpenSSL dependency policy, CI map. |

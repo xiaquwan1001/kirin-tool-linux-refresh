@@ -167,6 +167,10 @@ import os, pathlib, sys
 mode = os.environ.get("STUB_MODE", "ok")
 state = pathlib.Path(os.path.abspath(__file__)).with_suffix(".state")
 args = sys.argv[1:]
+log = os.environ.get("STUB_LOG")
+if log:
+    with open(log, "a") as handle:
+        handle.write(" ".join(args) + "\n")
 def answer(text, code=0):
     print(text)
     sys.exit(code)
@@ -181,9 +185,14 @@ if args[:1] == ["oem"] and len(args) > 1 and args[1].startswith("oeminfoerase-")
 if args[:1] == ["getvar"] and len(args) > 1:
     variable = args[1]
     if variable == "product":
-        # K6 pre-write identity gate: a real loader answers '(bootloader) product: <model>'.
-        # 'bad-product' imitates the 2026-11-15 loader, which answered the probe with a bare OKAY.
-        answer("OKAY") if mode == "bad-product" else answer("(bootloader) product: ELS-AN00\nOKAY")
+        # K6/R1 identity gate: a real loader answers '(bootloader) product: <model>'.
+        # 'bad-product' imitates the 2026-11-15 loader, which answered the probe with a bare OKAY;
+        # 'silent-product' imitates a probe that could not run (unreadable, therefore allowed).
+        if mode == "bad-product":
+            answer("OKAY")
+        if mode == "silent-product":
+            answer("")
+        answer("(bootloader) product: ELS-AN00\nOKAY")
     if variable.startswith("nve:SN@"):
         if mode == "write-fail":
             answer("FAILED (remote: variable write not allowed)", 1)
@@ -542,6 +551,164 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     }
     Check(refused, "two physical devices with the same VID/PID are refused with both named and --port suggested");
     try { Directory.Delete(sys, recursive: true); } catch { }
+}
+
+// ---------------------------------------------------------------- 10. R1 read-side identity gate
+// `oem dump-emmc`/`oem dump-storage`/`fetch` write host files and have already been sent to the
+// wrong phone (2026-11-15). They are judged by the same getvar product probe as a write, but only
+// an *invalid* answer blocks them: a probe that could not run stays unreadable and allowed.
+{
+    string callLog = Path.Combine(stubDir, "calls.log");
+    Environment.SetEnvironmentVariable("STUB_LOG", callLog);
+    try
+    {
+        // 10a. the loader answers a bare OKAY: no dump command may be launched.
+        Environment.SetEnvironmentVariable("STUB_MODE", "bad-product");
+        var refusedClient = new Kirin_Tool.Services.FastbootClient(stub);
+        File.Delete(callLog);
+        bool dumpRefused = false;
+        try { await refusedClient.OemCommandAsync("dump-emmc ptable \"" + Path.Combine(stubDir, "ptable.img") + "\""); }
+        catch (Kirin_Tool.Services.DeviceIdentityGate.DeviceIdentityRefusedException) { dumpRefused = true; }
+        Check(dumpRefused, "dump-emmc against an unidentified loader is refused");
+        string[] dumpCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(!dumpCalls.Any(line => line.Contains("dump-emmc")),
+            "an invalid identity sends zero dump commands (calls: " + string.Join(" | ", dumpCalls) + ")");
+        Check(dumpCalls.Any(line => line.Contains("getvar") && line.Contains("product")),
+            "the read gate still asks the device who it is before deciding");
+
+        // 10b. the raw `fetch` path is gated by the same verdict.
+        File.Delete(callLog);
+        bool fetchRefused = false;
+        try { await refusedClient.CommandAsync("fetch ptable \"" + Path.Combine(stubDir, "ptable2.img") + "\""); }
+        catch (Kirin_Tool.Services.DeviceIdentityGate.DeviceIdentityRefusedException) { fetchRefused = true; }
+        Check(fetchRefused, "fetch against an unidentified loader is refused");
+        string[] fetchCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(!fetchCalls.Any(line => line.Contains("fetch")),
+            "an invalid identity sends zero fetch commands (calls: " + string.Join(" | ", fetchCalls) + ")");
+
+        // 10c. a probe that could not run is unreadable, not a refusal: the dump proceeds (stub).
+        Environment.SetEnvironmentVariable("STUB_MODE", "silent-product");
+        var silentClient = new Kirin_Tool.Services.FastbootClient(stub);
+        File.Delete(callLog);
+        string silentOutput = await silentClient.OemCommandAsync("dump-emmc ptable \"" + Path.Combine(stubDir, "silent.img") + "\"");
+        string[] silentCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(silentCalls.Any(line => line.Contains("dump-emmc")),
+            "an unreadable probe does not block the dump (no device/stub scenario, calls: " + string.Join(" | ", silentCalls) + ")");
+        Check(silentOutput.Trim().Length > 0, "the unreadable-probe dump still reports the loader answer");
+
+        // 10d. a real product name keeps the dump allowed.
+        Environment.SetEnvironmentVariable("STUB_MODE", "ok");
+        var goodClient = new Kirin_Tool.Services.FastbootClient(stub);
+        File.Delete(callLog);
+        await goodClient.OemCommandAsync("dump-storage nvm \"" + Path.Combine(stubDir, "nvm.img") + "\"");
+        string[] goodCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(goodCalls.Any(line => line.Contains("dump-storage")), "a named device still dumps (dump-storage allowed)");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("STUB_LOG", null);
+        Environment.SetEnvironmentVariable("STUB_MODE", null);
+    }
+}
+
+// ---------------------------------------------------------------- 11. R3 Windows port uniqueness
+// The Windows half of K7. Windows cannot be exercised on this host, so the PnP enumeration is an
+// injectable seam and the fake data below is the whole test: one physical device exposing two COM
+// interfaces is ONE device, two physical devices are refused instead of taking "the first COM".
+{
+    Kirin_Tool.Utils.WindowsSerialDevice Device(string port, string deviceId, string? parent = null) =>
+        new(port, deviceId, parent, "HUAWEI Mobile Connect (" + port + ")");
+
+    // 11a. one phone, two COM interfaces (same composite USB device) -> still one port, as before.
+    var onePhone = new Func<int, int, IReadOnlyList<Kirin_Tool.Utils.WindowsSerialDevice>>((_, _) => new[]
+    {
+        Device("COM3", @"USB\VID_12D1&PID_3609&MI_00\6&1a2b3c4d&0&0000"),
+        Device("COM5", @"USB\VID_12D1&PID_3609&MI_02\6&1a2b3c4d&0&0002"),
+    });
+    Check(Kirin_Tool.Utils.WindowsSerialPortFinder.FindPort(0x12d1, 0x3609, onePhone) == "COM3",
+        "two COM interfaces of one physical Windows device still resolve to one port (GUI behaviour unchanged)");
+
+    // 11b. the same rule when the enumerator knows the parent device (WMI-agnostic seam).
+    var withParents = new Func<int, int, IReadOnlyList<Kirin_Tool.Utils.WindowsSerialDevice>>((_, _) => new[]
+    {
+        Device("COM3", @"USB\VID_12D1&PID_3609&MI_00\6&1a2b3c4d&0&0000", @"USB\VID_12D1&PID_3609\5&1111&0&1"),
+        Device("COM5", @"USB\VID_12D1&PID_3609&MI_02\6&1a2b3c4d&0&0002", @"USB\VID_12D1&PID_3609\5&1111&0&1"),
+    });
+    Check(Kirin_Tool.Utils.WindowsSerialPortFinder.FindPort(0x12d1, 0x3609, withParents) == "COM3",
+        "a shared parent device id also counts as one device");
+
+    // 11c. two physical phones with the same VID/PID -> refuse, naming both and --port.
+    var twoPhones = new Func<int, int, IReadOnlyList<Kirin_Tool.Utils.WindowsSerialDevice>>((_, _) => new[]
+    {
+        Device("COM3", @"USB\VID_12D1&PID_3609&MI_00\6&1a2b3c4d&0&0000"),
+        Device("COM7", @"USB\VID_12D1&PID_3609&MI_00\7&9f8e7d6c&0&0000"),
+    });
+    bool windowsRefused = false;
+    try
+    {
+        Kirin_Tool.Utils.WindowsSerialPortFinder.FindPort(0x12d1, 0x3609, twoPhones);
+    }
+    catch (Kirin_Tool.Utils.AmbiguousSerialDeviceException ex)
+    {
+        windowsRefused = ex.Message.Contains("--port") && ex.Message.Contains("COM3") && ex.Message.Contains("COM7");
+    }
+    Check(windowsRefused, "two physical Windows devices with the same VID/PID are refused with both COM ports named and --port suggested");
+
+    // 11d. no match / no port in the name -> null, not a guess.
+    Check(Kirin_Tool.Utils.WindowsSerialPortFinder.FindPort(0x12d1, 0x3609,
+            (_, _) => Array.Empty<Kirin_Tool.Utils.WindowsSerialDevice>()) == null,
+        "no matching Windows device is null (unchanged: caller reports 'No device in VCOM mode')");
+    Check(Kirin_Tool.Utils.WindowsSerialPortFinder.PortFromName("HUAWEI Mobile Connect (COM12)") == "COM12" &&
+          Kirin_Tool.Utils.WindowsSerialPortFinder.PortFromName("USB Serial Device") == null,
+        "the COM number is parsed from the PnP name, and a name without one is not a port");
+}
+
+// ---------------------------------------------------------------- 12. R4 fastboot fallback in the result
+// A non-bundled fastboot (`/usr/bin/fastboot` from platform-tools, a PATH hit, or an explicit
+// override) used to live only in kirintool_log_*.log. It is now a field of every JSON result
+// (and therefore of the MCP tool result, which is that text verbatim).
+{
+    stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    stubEnvironment["STUB_MODE"] = "ok";
+    try
+    {
+        (int code, string stdout, string stderr) = Run("doctor", "--json");
+        Check(code == 0, "doctor against an override fastboot exits 0 (got " + code + "): " + stderr.Trim());
+        using JsonDocument doc = JsonDocument.Parse(stdout);
+        JsonElement doctorRoot = doc.RootElement;
+        Check(doctorRoot.GetProperty("degraded").EnumerateArray().Any(entry => entry.GetString() == "system-fastboot-fallback"),
+            "doctor --json reports degraded:[system-fastboot-fallback]");
+        Check(doctorRoot.GetProperty("fastboot").GetProperty("fallback").GetBoolean(),
+            "doctor --json carries fastboot.fallback=true next to the existing found/path fields");
+        Check(doctorRoot.GetProperty("fastboot").GetProperty("path").GetString() == stub,
+            "doctor --json keeps the existing fastboot.path field unchanged");
+
+        (code, stdout, stderr) = Run("reboot", "--yes", "--json");
+        Check(code == 0, "reboot against the stub exits 0 (got " + code + ")");
+        using JsonDocument writeDoc = JsonDocument.Parse(stdout);
+        Check(writeDoc.RootElement.GetProperty("applied").GetBoolean(),
+            "the write command keeps its existing applied verdict");
+        Check(writeDoc.RootElement.GetProperty("degraded").EnumerateArray()
+                .Any(entry => entry.GetString() == "system-fastboot-fallback"),
+            "a write command's JSON carries the same degraded token (no per-command code)");
+        Check(writeDoc.RootElement.GetProperty("fastbootFallback").GetBoolean(),
+            "a write command names the fallback explicitly (fastbootFallback=true)");
+
+        // The classifier itself: the bundled layout is not a degradation.
+        var core = typeof(Kirin_Tool.Services.FastbootClient).Assembly;
+        Type signals = core.GetType("Kirin_Tool.Cli.DegradedSignals")
+            ?? throw new Exception("FAIL Kirin_Tool.Cli.DegradedSignals is gone");
+        var classify = signals.GetMethod("IsSystemFastbootFallback", BindingFlags.Public | BindingFlags.Static)!;
+        Check((bool)classify.Invoke(null, new object[] { "/usr/bin/fastboot" })!,
+            "/usr/bin/fastboot is classified as the system fallback");
+        Check(!(bool)classify.Invoke(null, new object[] { Path.Combine(AppContext.BaseDirectory, "fastboot", "fastboot") })!,
+            "the bundled fastboot directory is not a degradation");
+        Check(!(bool)classify.Invoke(null, new object[] { "" })!, "an absent fastboot is not a fallback token");
+    }
+    finally
+    {
+        stubEnvironment.Clear();
+    }
 }
 
 stubEnvironment.Clear();

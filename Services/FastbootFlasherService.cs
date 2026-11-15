@@ -27,6 +27,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
@@ -115,11 +116,28 @@ namespace Kirin_Tool.Services
                 op.Result(false, null, null, null, ex.Message, "timeout", "dump did not finish inside the client timeout");
                 return (false, "Dump operation timed out - partition may be too large");
             }
+            catch (OperationCanceledException)
+            {
+                // R2: a window close cancels the operation, and the child process tree is killed by
+                // ProcessRunner. That is a cancellation, not a dump failure: it must propagate so the
+                // caller's "cancelled" path runs instead of reporting a device error.
+                op.Result(false, null, null, null, "operation cancelled", "cancelled",
+                    "dump cancelled by the host; the fastboot child tree was killed");
+                TryDeleteCancelledDump(savePath);
+                throw;
+            }
             catch (Exception ex)
             {
                 op.Result(false, null, null, null, ex.Message, OpLog.ExceptionVerdict(ex));
                 return (false, $"Dump failed: {ex.Message}");
             }
+        }
+
+        /// <summary>R2: a cancelled dump leaves no half-written image behind in the backup directory.</summary>
+        private static void TryDeleteCancelledDump(string savePath)
+        {
+            try { if (File.Exists(savePath)) File.Delete(savePath); }
+            catch (Exception) { /* best effort, the cancellation verdict is what matters */ }
         }
 
         // Stock fastboot passes "oem dump-*" through without saving the uploaded data,
@@ -161,6 +179,13 @@ namespace Kirin_Tool.Services
                         OpLog.ExitVerdict(result), "verdict rule: fastboot exit code (GUI per-image path)");
 
                 return (result.IsSuccess, result.Output);
+            }
+            catch (OperationCanceledException)
+            {
+                // R2: same rule as the dump path - a close cancels, it does not "fail" the device write.
+                op.Result(false, null, null, null, "operation cancelled", "cancelled",
+                    "flash cancelled by the host; the fastboot child tree was killed");
+                throw;
             }
             catch (Exception ex)
             {

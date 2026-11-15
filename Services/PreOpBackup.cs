@@ -113,10 +113,16 @@ public sealed class PreOpBackup
         _getVarAsync = getVarAsync;
     }
 
-    /// <summary>Test/diagnostics constructor with an injectable dump delegate: (partitionName, savePath) → result.</summary>
-    public PreOpBackup(Func<string, string, Task<(bool Success, string Message)>> dumpAsync)
+    /// <summary>
+    /// Test/diagnostics constructor with an injectable dump delegate: (partitionName, savePath) → result.
+    /// <paramref name="getVarAsync"/> feeds the identity gate exactly like the production reader; when it
+    /// is null the probe is unreadable, which the gate allows (no device / stub scenario).
+    /// </summary>
+    public PreOpBackup(Func<string, string, Task<(bool Success, string Message)>> dumpAsync,
+        Func<string, Task<string?>>? getVarAsync = null)
     {
         _dumpAsync = dumpAsync ?? throw new ArgumentNullException(nameof(dumpAsync));
+        _getVarAsync = getVarAsync;
     }
 
     /// <summary>
@@ -178,6 +184,24 @@ public sealed class PreOpBackup
             + options.PerPartitionTimeout.TotalSeconds.ToString("0") + "s");
         op.Step("backup set: " + string.Join(", ", PartitionList(options)));
 
+        // R1 (audit 2026-11-15 §4): the dump commands write real files on the host and have
+        // already been sent to the wrong phone. Judge the device BEFORE the backup directory is
+        // created, so an invalid identity leaves no directory and no dump file behind.
+        // Unreadable (no device, stub, timeout) still proceeds: a probe that could not run is
+        // not evidence of the wrong device (same rule as the K6 write gate).
+        if (!_deviceIdentityRead) await ReadDeviceIdentityAsync(op);
+        if (Identity is { Refused: true } refusedIdentity)
+        {
+            string refusal = "device did not identify itself; refusing to dump partitions and writing no backup file: "
+                + refusedIdentity.Reason;
+            op.Step(OpLog.FailedPrefix + "identity refused: " + refusedIdentity.Describe()
+                + "; no dump command is sent");
+            op.Result(false, null, null, null, refusal, DeviceIdentityGate.VerdictRefusedRead,
+                "refused before the first dump");
+            return new PreOpBackupResult(false, false, null, null, Array.Empty<PreOpBackupPartitionResult>(),
+                refusal, refusedIdentity);
+        }
+
         string backupDir;
         try
         {
@@ -188,11 +212,9 @@ public sealed class PreOpBackup
             op.Result(false, null, null, null, ex.Message, OpLog.ExceptionVerdict(ex),
                 "cannot create backup directory; nothing was dumped");
             return new PreOpBackupResult(false, false, null, null, Array.Empty<PreOpBackupPartitionResult>(),
-                $"cannot create backup directory: {ex.Message}");
+                $"cannot create backup directory: {ex.Message}", Identity);
         }
         op.Step("backup directory: " + backupDir);
-
-        if (!_deviceIdentityRead) await ReadDeviceIdentityAsync(op);
 
         var partitions = new List<PreOpBackupPartitionResult>();
         // Same partition, single dump per process: cache the result by name (case-insensitive).

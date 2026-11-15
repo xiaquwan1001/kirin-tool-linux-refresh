@@ -64,6 +64,15 @@ namespace Kirin_Tool.Services.Diagnostics
         /// answered <c>getvar product</c> with something that is not a model name.
         /// </summary>
         public const string WriteIdentity = "write.identity";
+
+        /// <summary>
+        /// R1 read-side identity gate (audit 2026-11-15 §4): a command that *pulls* data off the
+        /// device (`oem dump-emmc`/`oem dump-storage`, `fetch`) was refused because the loader
+        /// answered `getvar product` with something that is not a model name. Same judgement as
+        /// `write.identity`, different op name because nothing was written to the device — the
+        /// commands it blocks write files on the host and have already hit the wrong phone.
+        /// </summary>
+        public const string ReadIdentity = "read.identity";
     }
 
     /// <summary>Tool/category values used by the op scopes below (they become directory names).</summary>

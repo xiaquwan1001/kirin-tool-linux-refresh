@@ -60,6 +60,13 @@ public static class DeviceIdentityGate
     /// <summary>The op/verdict source recorded when the gate refuses a write.</summary>
     public const string VerdictRefused = "device-identity";
 
+    /// <summary>
+    /// The op/verdict source recorded when the gate refuses a *read* that writes host files
+    /// (`oem dump-emmc/dump-storage`, `fetch`). A read refusal is not a write refusal: the
+    /// device was not touched, so the two verdicts must stay distinguishable in the log.
+    /// </summary>
+    public const string VerdictRefusedRead = "device-identity-read";
+
     /// <summary>Model prefixes shipped by Huawei for Kirin phones (hint only, never a whitelist).</summary>
     private static readonly string[] KirinFamilyMarkers =
     {

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Kirin_Tool.Cli;
@@ -32,7 +33,22 @@ internal sealed class CliContext
     public bool Yes { get; }
     public string WorkingDirectory { get; }
 
-    public void WriteJson(object value) => Output.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
+    /// <summary>
+    /// Serialize one command result. R4: the shared writer adds the `degraded` field (and the
+    /// fastboot fallback flag) so every CLI command and every MCP tool result carries it without
+    /// each command having to know about it. Existing properties are never modified.
+    /// </summary>
+    public void WriteJson(object value)
+    {
+        if (JsonSerializer.SerializeToNode(value, JsonOptions) is JsonObject result)
+        {
+            DegradedSignals.Apply(result);
+            Output.WriteLine(result.ToJsonString(JsonOptions));
+            return;
+        }
+
+        Output.WriteLine(JsonSerializer.Serialize(value, JsonOptions));
+    }
 
     /// <summary>Humans-only progress/diagnostics: always stderr.</summary>
     public void Diag(string message) => Error.WriteLine(message);

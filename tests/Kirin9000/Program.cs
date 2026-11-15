@@ -90,4 +90,50 @@ try {
 } finally {Directory.Delete(fixtureDir,true);}
 combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi980")==true);Dispatcher.UIThread.RunJobs();
 Check(!owner.FindControl<Border>("Kirin9000Notice")!.IsVisible,"switching back clears experimental notice");
+
+// ------------------------------------------------- R2: closing the window cancels the operation
+// The 2026-11-15 orphan: the GUI exited while a fastboot child kept running for four minutes.
+// Here a stub fastboot dumps "forever"; closing the window must cancel the operation, kill the
+// child process tree, and leave a cancelled message on the progress dialog.
+{
+ string cancelDir=Path.Combine(Path.GetTempPath(),"kirin9000-cancel-"+Guid.NewGuid().ToString("N"));
+ Directory.CreateDirectory(cancelDir);
+ try {
+  string slow=Path.Combine(cancelDir,"slow-fastboot"), pidFile=Path.Combine(cancelDir,"child.pid");
+  string[] scriptLines = {
+   "#!/usr/bin/python3",
+   "import os,sys,time",
+   "args=sys.argv[1:]",
+   "if args==['devices']:",
+   "    print('TEST fastboot'); sys.exit(0)",
+   "if args[:1]==['getvar']:",
+   "    print('(bootloader) product: NOH-AN00'); print('OKAY'); sys.exit(0)",
+   "open(" + System.Text.Json.JsonSerializer.Serialize(pidFile) + ",'w').write(str(os.getpid()))",
+   "print('OKAY',flush=True)",
+   "time.sleep(300)",
+  };
+  File.WriteAllText(slow,string.Join((char)10, scriptLines));
+  if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(slow,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+  bool ChildAlive(int processId) => Directory.Exists("/proc/"+processId);
+  typeof(MainWindow).GetField("_fastbootFlasherService",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(owner,new FastbootFlasherService(new FastbootClient(slow)));
+  var dumpTask=(Task)typeof(MainWindow).GetMethod("DumpPartitionsProcess",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(owner,[ new List<FastbootPartition>{ new FastbootPartition("ptable") }, Path.Combine(cancelDir,"dumped") ])!;
+  var until=DateTime.UtcNow.AddSeconds(30);
+  while(!(File.Exists(pidFile)&&new FileInfo(pidFile).Length>0)) { Dispatcher.UIThread.RunJobs(); if(DateTime.UtcNow>until) throw new Exception("the slow dump child never started"); Thread.Sleep(20); }
+  int childPid=int.Parse(File.ReadAllText(pidFile).Trim());
+  var dumpProgress=owner.OwnedWindows.OfType<Kirin_Tool.UI.ProcessDialogUapp>().FirstOrDefault()??throw new Exception("no dump progress dialog");
+  Check(ChildAlive(childPid),"R2: the slow dump child is running before the window is closed");
+  var closeStarted=DateTime.UtcNow;
+  owner.Close();
+  until=DateTime.UtcNow.AddSeconds(15);
+  while(!dumpTask.IsCompleted&&DateTime.UtcNow<until){Dispatcher.UIThread.RunJobs();Thread.Sleep(20);}
+  Check(dumpTask.IsCompleted,"R2: closing the window finishes the running dump inside the grace period ("+(DateTime.UtcNow-closeStarted).TotalSeconds.ToString("0.0")+"s)");
+  until=DateTime.UtcNow.AddSeconds(5);
+  while(ChildAlive(childPid)&&DateTime.UtcNow<until) Thread.Sleep(20);
+  Check(!ChildAlive(childPid),"R2: closing the window kills the fastboot child process tree (pid "+childPid+")");
+  string dumpStatus=(dumpProgress.OverallStatusText??"")+" "+(dumpProgress.CurrentOperationText??"");
+  Check(dumpStatus.Contains("cancel",StringComparison.OrdinalIgnoreCase),"R2: the progress dialog reports the operation as cancelled: "+dumpStatus.Trim());
+  dumpTask.GetAwaiter().GetResult();
+ } finally { OperationCancellation.ResetForTests(); try{Directory.Delete(cancelDir,true);}catch{} }
+}
+
 owner.Close();Console.WriteLine($"{count} Kirin9000/PSID checks passed; no device operations.");

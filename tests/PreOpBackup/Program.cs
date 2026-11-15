@@ -22,6 +22,7 @@ internal static class Program
             TestDirectoryNamingNeverOverwrites();
             TestManifestStructureAndStatuses();
             TestAllUnsupportedStillContinues();
+            TestIdentityRefusalBlocksDump();
             TestAtomicManifestRename();
             TestOperationLogCoverage(scratch);
         }
@@ -173,6 +174,48 @@ internal static class Program
             Check(json.Contains("\"identity\"", StringComparison.Ordinal) && json.Contains("\"refused\": false", StringComparison.Ordinal),
                 "K6: the manifest records the identity verdict (no dump reader wired -> unreadable, not refused)");
             Check(json.Contains("\"writePlan\":", StringComparison.Ordinal), "manifest records the write plan");
+        }
+        finally
+        {
+            try { Directory.Delete(baseDir, recursive: true); } catch { }
+        }
+    }
+
+    // (c2) R1: an invalid identity refuses the dump BEFORE any dump command is sent.
+    // The 2026-11-15 loader answered getvar product with a bare OKAY: that is not an identity,
+    // and a command whose whole purpose is to pull a partition off the device must not run.
+    private static void TestIdentityRefusalBlocksDump()
+    {
+        string baseDir = Path.Combine(Path.GetTempPath(), "kirin-backup-identity-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            int dumpCalls = 0;
+            var backup = new PreOpBackup(
+                (partition, path) =>
+                {
+                    dumpCalls++;
+                    File.WriteAllText(path, "payload-" + partition);
+                    return Task.FromResult((true, "OKAY"));
+                },
+                variable =>
+                {
+                    // The incident shape: the loader answers, but not with a product line.
+                    return Task.FromResult<string?>(variable == "product" ? "OKAY" : "TEST0001");
+                });
+
+            var result = backup.RunAsync(new PreOpBackupOptions
+            {
+                Trigger = "gui-rescue",
+                WritePartitions = new[] { "oeminfo", "nvm" },
+                BackupDir = baseDir,
+            }).GetAwaiter().GetResult();
+
+            Check(!result.Attempted, "invalid identity: the backup is not attempted");
+            Check(dumpCalls == 0, "invalid identity: not a single dump command is sent (got " + dumpCalls + ")");
+            Check(result.Error != null && result.Error.Contains("identify"), "invalid identity: the error says the device did not identify itself");
+            Check(result.Identity is { Refused: true }, "invalid identity: the verdict is recorded on the result");
+            Check(result.Directory == null && result.ManifestPath == null, "invalid identity: no backup directory and no manifest");
+            Check(!Directory.Exists(baseDir), "invalid identity: the backup directory was never created (no dump file left behind)");
         }
         finally
         {

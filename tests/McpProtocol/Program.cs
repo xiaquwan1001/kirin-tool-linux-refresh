@@ -64,6 +64,12 @@ try
             ["jsonrpc"] = "2.0", ["id"] = id, ["method"] = "tools/call", ["params"] = parameters,
         });
 
+    // R4: a non-bundled fastboot must be visible in the MCP tool result, not only in a log file.
+    // The stub answers no device, so `info` stays hardware-free; only the provenance is asserted.
+    string stub = Path.Combine(work, "mcp-stub-fastboot");
+    File.WriteAllText(stub, "#!/usr/bin/env python3\nimport sys\nif sys.argv[1:]==['devices']: sys.exit(0)\nprint('OKAY')\n");
+    if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(stub, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
     string args1 = JsonSerializer.Serialize(new Dictionary<string, object> { ["files"] = cleanApp });
     string args2 = JsonSerializer.Serialize(new Dictionary<string, object> { ["files"] = redlineApp, ["confirm"] = true });
 
@@ -75,6 +81,7 @@ try
         Req(4, new Dictionary<string, object> { ["name"] = "flash_ota", ["arguments"] = new Dictionary<string, object> { ["files"] = cleanApp, ["allow-redline"] = true, ["confirm"] = true } }),
         Req(5, new Dictionary<string, object> { ["name"] = "flash_ota", ["arguments"] = new Dictionary<string, object> { ["files"] = cleanApp } }),
         Req(6, new Dictionary<string, object> { ["name"] = "flash_ota", ["arguments"] = new Dictionary<string, object> { ["files"] = redlineApp, ["confirm"] = true } }),
+        Req(7, new Dictionary<string, object> { ["name"] = "info", ["arguments"] = new Dictionary<string, object>() }),
     };
 
     var psi = new ProcessStartInfo(cli.EndsWith(".dll", StringComparison.Ordinal) ? "dotnet" : cli)
@@ -86,6 +93,7 @@ try
     };
     if (cli.EndsWith(".dll", StringComparison.Ordinal)) psi.ArgumentList.Add(cli);
     psi.ArgumentList.Add("mcp");
+    psi.Environment["KIRIN_FASTBOOT"] = stub;
     using Process process = Process.Start(psi)!;
     foreach (string request in requests) process.StandardInput.WriteLine(request);
     process.StandardInput.Close();
@@ -148,6 +156,20 @@ try
             && gate.GetString() == "refused", "flash_ota with redline + confirm: gate=refused");
         if (plan.ValueKind == JsonValueKind.Object && plan.TryGetProperty("applied", out JsonElement applied))
             Check(!applied.GetBoolean(), "flash_ota with redline + confirm: applied=false");
+    }
+
+    // (g) R4: the fastboot fallback reaches the MCP result through the shared JSON writer.
+    {
+        JsonElement result = R(7).GetProperty("result");
+        JsonElement structured = result.GetProperty("structuredContent");
+        Check(structured.GetProperty("degraded").EnumerateArray()
+                .Any(entry => entry.GetString() == "system-fastboot-fallback"),
+            "MCP result carries degraded:[system-fastboot-fallback] for a non-bundled fastboot");
+        Check(structured.GetProperty("fastboot").GetProperty("fallback").GetBoolean(),
+            "MCP result carries fastboot.fallback=true");
+        Check(result.GetProperty("content")[0].GetProperty("text").GetString()!
+                .Contains("system-fastboot-fallback", StringComparison.Ordinal),
+            "the MCP text content carries the same token (clients that only read text are not blind)");
     }
 }
 finally

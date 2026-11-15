@@ -43,6 +43,10 @@ namespace Kirin_Tool.Services
         /// </summary>
         private DeviceIdentity? _identity;
 
+        /// <summary>The probe result the cached <see cref="DeviceIdentity"/> was derived from, kept so a
+        /// refusal can quote the loader answer without probing a second time.</summary>
+        private ProcessResult? _identityRead;
+
         private const int UnlockTimeoutMinutes = 300;
 
         /// <summary>
@@ -117,15 +121,41 @@ namespace Kirin_Tool.Services
         /// </summary>
         public async Task<DeviceIdentity> EnsureWritableIdentityAsync()
         {
-            if (_identity is { Refused: true } refused) throw Refusal(refused, null);
-            if (_identity != null) return _identity;
-
             // A write-path warning, not a refusal: Google platform-tools may behave differently
             // against these loaders, so the audit trail must say which binary was used.
-            if (IsSystemFastboot)
+            if (IsSystemFastboot && _identity == null)
                 ProcessRunner.WriteDiagnostic("FastbootClient",
                     "warning: using the system fastboot at " + _fastbootPath
                     + " (the bundled Huawei client was not found); a write is being attempted with it");
+
+            (DeviceIdentity identity, ProcessResult? read) = await ProbeIdentityAsync();
+            if (identity.Refused) throw Refusal(identity, read);
+            return identity;
+        }
+
+        /// <summary>
+        /// R1 read gate (audit 2026-11-15 §4). The commands that *pull* data off the device
+        /// (`oem dump-emmc`, `oem dump-storage`, `fetch`) write files on the host and have
+        /// already been sent to the wrong phone. They are gated by the same probe as the write
+        /// path (one `getvar product` per client, cached) but with a weaker rule:
+        ///
+        /// * <b>invalid</b> (the loader answered, and the answer is not a model name) — refuse.
+        ///   That is exactly the 2026-11-15 shape, and a command that writes host files must not
+        ///   run on a device that cannot name itself.
+        /// * <b>unreadable</b> (no device, stub, timeout, non-zero exit) — allowed, like the write
+        ///   path: a probe that could not run is not evidence of the wrong device.
+        /// </summary>
+        public async Task<DeviceIdentity> EnsureReadableIdentityAsync()
+        {
+            (DeviceIdentity identity, ProcessResult? read) = await ProbeIdentityAsync();
+            if (identity.Refused) throw ReadRefusal(identity, read);
+            return identity;
+        }
+
+        /// <summary>One `getvar product` per client; both gates share (and cache) the verdict.</summary>
+        private async Task<(DeviceIdentity Identity, ProcessResult? Read)> ProbeIdentityAsync()
+        {
+            if (_identity != null) return (_identity, _identityRead);
 
             ProcessResult? read = null;
             try
@@ -141,9 +171,8 @@ namespace Kirin_Tool.Services
             string? product = read == null ? null : DeviceIdentityGate.ParseProduct(read.Output);
             DeviceIdentity identity = DeviceIdentityGate.Evaluate(read, product);
             _identity = identity;
-
-            if (identity.Refused) throw Refusal(identity, read);
-            return identity;
+            _identityRead = read;
+            return (identity, read);
         }
 
         /// <summary>One <c>write.identity</c> op per refusal, then the exception the callers already handle.</summary>
@@ -158,6 +187,38 @@ namespace Kirin_Tool.Services
             op.Result(false, read?.ExitCode, null, read?.Output, null,
                 DeviceIdentityGate.VerdictRefused, message);
             return new DeviceIdentityGate.DeviceIdentityRefusedException(message);
+        }
+
+        /// <summary>One `read.identity` op per read refusal, then the same exception type the callers handle.</summary>
+        private static DeviceIdentityGate.DeviceIdentityRefusedException ReadRefusal(DeviceIdentity identity, ProcessResult? read)
+        {
+            string message = "Refusing to read from the device: it did not identify itself. " + identity.Reason
+                + ". No dump/fetch command was sent (nothing was written on this host). Reconnect the phone"
+                + " and confirm 'fastboot getvar product' answers a model name (e.g. ELS-AN00).";
+            using OperationScope op = OpLog.Begin(OpNames.ReadIdentity, OpLog.FlashTool,
+                new[] { "getvar", "product" }, "pre-read identity gate (audit 2026-11-15 §4)");
+            op.Step(OpLog.FailedPrefix + "identity: " + identity.Describe());
+            op.Result(false, read?.ExitCode, null, read?.Output, null,
+                DeviceIdentityGate.VerdictRefusedRead, message);
+            return new DeviceIdentityGate.DeviceIdentityRefusedException(message);
+        }
+
+        /// <summary>
+        /// True when the subcommand pulls data off the device and therefore writes host files
+        /// (`oem dump-emmc`/`oem dump-storage`, `fetch`). Options are skipped, the literal
+        /// `oem` prefix is skipped, and only the first real subcommand decides.
+        /// </summary>
+        private static bool IsDevicePullingCommand(IReadOnlyList<string> tokens)
+        {
+            foreach (string token in tokens)
+            {
+                string value = token.Trim();
+                if (value.Length == 0 || value.StartsWith("-", StringComparison.Ordinal)) continue;
+                if (string.Equals(value, "oem", StringComparison.OrdinalIgnoreCase)) continue;
+                return value.StartsWith("dump-", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(value, "fetch", StringComparison.OrdinalIgnoreCase);
+            }
+            return false;
         }
 
         private static string ResolveDefaultFastbootPath(out bool systemFallback)
@@ -280,12 +341,17 @@ namespace Kirin_Tool.Services
 
         public async Task<string> OemCommandAsync(string command, int timeoutMinutes = 300)
         {
+            // R1: `oem dump-emmc/dump-storage` write real files on the host; they are not writes
+            // to the device and therefore were outside the K6 gate. They are gated here.
+            if (IsDevicePullingCommand(OperationLogger.ParseArgv(command))) await EnsureReadableIdentityAsync();
             var result = await ProcessRunner.RunAsync(_fastbootPath, $"oem {command}", timeoutMinutes: timeoutMinutes, op: "fastboot.oem." + FirstWord(command));
             return result.Output;
         }
 
         public async Task<string> CommandAsync(string arguments, int timeoutMinutes = 300)
         {
+            // R1: the same rule for a raw command line, so a `fetch` never bypasses the gate.
+            if (IsDevicePullingCommand(OperationLogger.ParseArgv(arguments))) await EnsureReadableIdentityAsync();
             var result = await ProcessRunner.RunAsync(_fastbootPath, arguments, timeoutMinutes: timeoutMinutes, op: "fastboot." + FirstWord(arguments));
             return result.Output;
         }

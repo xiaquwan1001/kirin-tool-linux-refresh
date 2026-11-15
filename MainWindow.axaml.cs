@@ -174,6 +174,10 @@ namespace Kirin_Tool
             StartApprovalGate();
 
             Closed += (_, _) => { _extractionCancellation?.Cancel(); _approvalServer?.Dispose(); };
+            // R2: closing the window cancels the operations it started (their CancellationTokenSource)
+            // and kills the process trees they own. Before this, only host-process exit killed a child;
+            // the 2026-11-15 fastboot kept running for four minutes after the GUI was gone.
+            Closing += (_, _) => OperationCancellation.CancelAll();
             Opened += async (_, _) => await RefreshUdevNoticeAsync();
             Activated += async (_, _) => await RefreshUdevNoticeAsync();
             SetupNavigationItemHandlers();
@@ -406,6 +410,9 @@ namespace Kirin_Tool
         private async Task DumpPartitionsProcess(List<FastbootPartition> selectedPartitions, string dumpDirectory)
         {
             using var cancellationTokenSource = new CancellationTokenSource();
+            // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
+            // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
+            using var operationCancellationRegistration = OperationCancellation.Track(cancellationTokenSource);
 
             var partitionInfos = ConvertToPartitionInfo(selectedPartitions);
 
@@ -435,6 +442,16 @@ namespace Kirin_Tool
                     {
                         progressDialog.OverallStatusText = $"Successfully dumped all {dumpResult.SuccessCount} partitions!";
                         progressDialog.CurrentOperationText = $"Dumping completed successfully.";
+                    });
+                }
+                else if (cancellationTokenSource.IsCancellationRequested)
+                {
+                    // R2: a close cancels the dump; the "completed with errors" text would hide that.
+                    // Same rows/status, only the wording distinguishes a cancellation from a failure.
+                    _ = Dispatcher.UIThread.InvokeAsync(() =>
+                    {
+                        progressDialog.OverallStatusText = $"Cancelled after {dumpResult.SuccessCount}/{dumpResult.TotalCount} partitions";
+                        progressDialog.CurrentOperationText = "Dump operation was cancelled; the fastboot child was stopped.";
                     });
                 }
                 else
@@ -560,6 +577,9 @@ namespace Kirin_Tool
             var partitionInfos = ConvertToPartitionInfo(selectedPartitions);
 
             using var cancellationTokenSource = new CancellationTokenSource();
+            // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
+            // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
+            using var operationCancellationRegistration = OperationCancellation.Track(cancellationTokenSource);
             var progressDialog = new ProcessDialogUapp(partitionInfos, cancellationTokenSource);
 
             bool dialogClosed = false;
@@ -987,6 +1007,9 @@ namespace Kirin_Tool
         private async Task StartUsbUpdateFlash()
         {
             using var cancellationTokenSource = new CancellationTokenSource();
+            // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
+            // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
+            using var operationCancellationRegistration = OperationCancellation.Track(cancellationTokenSource);
             var filesData = new List<(string? FilePath, string Label, List<string> SelectedPartitions)>();
 
             var sourceFiles = new[]
@@ -1178,6 +1201,9 @@ namespace Kirin_Tool
             }
 
             using var cancellationTokenSource = new CancellationTokenSource();
+            // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
+            // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
+            using var operationCancellationRegistration = OperationCancellation.Track(cancellationTokenSource);
 
             var allPartitions = new List<(PartitionInfo Partition, string? Source)>();
 
@@ -2098,6 +2124,9 @@ namespace Kirin_Tool
         private async Task HandleRebootToUsbUpdate()
         {
             using var cancellationTokenSource = new CancellationTokenSource();
+            // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
+            // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
+            using var operationCancellationRegistration = OperationCancellation.Track(cancellationTokenSource);
             if (!UsbUpdateFile.HasFile)
             {
                 await ShowMessageBox("File Required", "Please select a Base UPDATE.APP file first.");

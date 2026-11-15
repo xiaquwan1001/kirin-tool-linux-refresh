@@ -23,7 +23,6 @@ using System;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
-using System.Management;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
@@ -411,15 +410,11 @@ namespace Kirin_Tool.Services
         // turns that into "No device in VCOM mode".
         private static string? FindWindowsPortByVidPid(int vid, int pid)
         {
-            string pattern = $"VID_{vid:X4}&PID_{pid:X4}";
-            using var searcher = new ManagementObjectSearcher(
-                $"SELECT Name FROM Win32_PnPEntity WHERE DeviceID LIKE '%{pattern}%'");
-
-            return searcher.Get()
-                .Cast<ManagementBaseObject>()
-                .Select(device => device["Name"]?.ToString())
-                .FirstOrDefault(name => name?.Contains("COM", StringComparison.OrdinalIgnoreCase) == true)
-                ?.Split('(', ')')[1];
+            // R3 (audit 2026-11-15 §4): same rule as the Linux finder (K7). The enumeration and
+            // the physical-device grouping live in WindowsSerialPortFinder; one device with several
+            // COM interfaces still returns its first port, two physical devices throw
+            // AmbiguousSerialDeviceException instead of guessing "the first COM port".
+            return WindowsSerialPortFinder.FindPort(vid, pid);
         }
 
         public void Dispose()
