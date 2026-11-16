@@ -118,9 +118,26 @@ namespace Kirin_Tool.Services
                 // model/regionVendor are caller-validated (CLI: arg validation; GUI: non-empty field
                 // gate). null-forgiving preserves the existing behaviour (a null would NRE inside
                 // UpdateEntry and be reported by the catch) without widening the editor contract.
-                var modifiedData = editor.EditEntries(model!, vendorCountry!);
+                var edit = editor.EditEntriesDetailed(model!, vendorCountry!);
+                var modifiedData = edit.Data;
                 op.Step(OpLog.OkPrefix + "converted: " + originalData.Length + " -> " + modifiedData.Length
-                    + " byte(s), model=" + (model ?? "(none)") + ", region=" + (vendorCountry ?? "(none)"));
+                    + " byte(s), model=" + (model ?? "(none)") + ", region=" + (vendorCountry ?? "(none)")
+                    + ", entries rewritten: model=" + edit.ModelEntriesRewritten
+                    + " region=" + edit.RegionEntriesRewritten);
+
+                // D-11 / audit F05: zero matched entries used to be a "success" whose output was
+                // byte-identical to its input; that image would be flashed back unchanged while
+                // the UI said the model/region had been converted.
+                if (!edit.AnyRewritten)
+                {
+                    result.ErrorMessage =
+                        "OEMInfo conversion matched 0 entries for version " + editor.DetectedVersion +
+                        "; the image was not modified (nothing to rewrite for model/region).";
+                    op.Result(false, null, null, null, result.ErrorMessage, "conversion:no-entry-rewritten",
+                        "the converted image is identical to the input; reported as a failure instead of a silent success");
+                    progress?.Report("Conversion failed: no matching OEMINFO entry was found!");
+                    return result;
+                }
 
                 result.ConvertedData = modifiedData;
                 result.IsSuccess = true;

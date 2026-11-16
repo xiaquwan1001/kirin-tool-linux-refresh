@@ -445,6 +445,19 @@ try
         Check(convertSteps.Any(s => s.Contains("redline")), "conversion records the oeminfo redline judgement");
         Check(convertSteps.Any(s => s.Contains("converted:")), "conversion records input and output sizes");
 
+        // D-11 (2026-11-17): a supported version with no matching entry id used to be a
+        // "success" whose output was byte-identical to the input.
+        await File.WriteAllBytesAsync(oeminfo, OemInfoImage(9, 0x7ff));
+        OemInfoConversionResult noHits = await service.ConvertOemInfo(false, oeminfo, "MODEL-A", "hw/cn");
+        Check(!noHits.IsSuccess, "a conversion that rewrites 0 entries is not a success");
+        Check(noHits.ConvertedData == null, "no converted image is handed back when nothing was rewritten");
+        JsonElement noHitsResult = LatestOp(work, "oeminfo.convert")[^1];
+        Check(!noHitsResult.GetProperty("ok").GetBoolean(), "zero rewritten entries writes ok=false");
+        Check(noHitsResult.GetProperty("verdictSource").GetString() == "conversion:no-entry-rewritten",
+            "zero hits are a named verdict: " + noHitsResult.GetProperty("verdictSource").GetString());
+        Check(StepNotes(LatestOp(work, "oeminfo.convert")).Any(s => s.Contains("entries rewritten: model=0 region=0")),
+            "the op records how many entries were rewritten");
+
         await File.WriteAllBytesAsync(oeminfo, OemInfoImage(7, 0x301));
         OemInfoConversionResult unsupported = await service.ConvertOemInfo(false, oeminfo, "M", "R");
         Check(!unsupported.IsSuccess, "an unsupported oeminfo version does not convert");
