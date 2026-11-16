@@ -20,6 +20,7 @@
 
 using Kirin_Tool.Models;
 using Kirin_Tool.Services.Diagnostics;
+using Kirin_Tool.Services.Verdict;
 using Kirin_Tool.Utils;
 using System;
 using System.Collections.Generic;
@@ -73,42 +74,37 @@ namespace Kirin_Tool.Services
                     op.Step(OpLog.DegradedPrefix + "stale dump file could not be deleted: " + savePath + " (" + ex.Message + ")");
                 }
 
-                var result = await _fastbootClient.OemCommandAsync($"dump-emmc {partitionName} \"{savePath}\"", timeoutMinutes: 300);
-                bool wroteFile = DumpFileWasWritten(savePath);
-                bool outputClean = !string.IsNullOrEmpty(result) &&
-                                !result.ToLower().Contains("fail") &&
-                                !result.ToLower().Contains("error");
-                bool isSuccess = wroteFile && outputClean;
-                op.Step("verb dump-emmc: " + (wroteFile ? "file written " + OpLog.FileStep(savePath) : "no file written")
-                    + ", output-clean=" + (outputClean ? "yes" : "no"));
+                // D-09 / audit F09+S22: the declared partition size is the only host-side bound
+                // a dump can be checked against. When the loader cannot answer, the size half is
+                // recorded as unchecked instead of being silently skipped.
+                long? declaredBytes = await DeclaredPartitionSizeAsync(partitionName, op);
 
-                if (isSuccess)
+                var result = await _fastbootClient.OemCommandAsync($"dump-emmc {partitionName} \"{savePath}\"", timeoutMinutes: 300);
+                var emmcVerdict = JudgeDump(savePath, declaredBytes, result);
+                op.Step("verb dump-emmc: " + DescribeDump(emmcVerdict));
+
+                if (emmcVerdict.Ok)
                 {
-                    op.Result(true, null, null, result, null, "file-written", "dump-emmc wrote a non-empty file");
+                    op.Result(true, null, null, result, null, emmcVerdict.Verdict, emmcVerdict.Reason);
                     return (true, result ?? "Dump completed");
                 }
 
                 var storageResult = await _fastbootClient.OemCommandAsync($"dump-storage {partitionName} \"{savePath}\"", timeoutMinutes: 300);
-                bool storageWroteFile = DumpFileWasWritten(savePath);
-                bool storageClean = !string.IsNullOrEmpty(storageResult) &&
-                                     !storageResult.ToLower().Contains("fail") &&
-                                     !storageResult.ToLower().Contains("error");
-                bool storageSuccess = storageWroteFile && storageClean;
-                op.Step("verb dump-storage fallback: " + (storageWroteFile ? "file written " + OpLog.FileStep(savePath) : "no file written")
-                    + ", output-clean=" + (storageClean ? "yes" : "no"));
-                if (!storageSuccess)
+                var storageVerdict = JudgeDump(savePath, declaredBytes, storageResult);
+                op.Step("verb dump-storage fallback: " + DescribeDump(storageVerdict));
+                if (!storageVerdict.Ok)
                 {
-                    string verdict = storageWroteFile ? "loader-capability:dump-verb" : "file-missing";
+                    string verdict = storageVerdict.Verdict;
                     if (!string.IsNullOrEmpty(storageResult) &&
                         (storageResult.ToLower().Contains("invalid command") || storageResult.ToLower().Contains("not support")))
                         verdict = "loader-capability:invalid-command";
                     op.Result(false, null, null, null, storageResult, verdict,
-                        "neither dump-emmc nor dump-storage produced a usable file; recorded as a loader capability gap");
+                        "neither dump-emmc nor dump-storage produced a usable file; " + storageVerdict.Reason);
                     return (false, string.IsNullOrEmpty(storageResult) || storageResult.ToLower().Contains("fail") || storageResult.ToLower().Contains("error")
                         ? $"Dump failed. The Huawei fastboot client normally writes '{savePath}' on the host; the system fastboot cannot save uploaded partition data."
                         : storageResult);
                 }
-                op.Result(true, null, null, storageResult, null, "file-written", "dump-storage wrote a non-empty file");
+                op.Result(true, null, null, storageResult, null, storageVerdict.Verdict, storageVerdict.Reason);
                 return (true, storageResult ?? "Dump completed");
             }
             catch (TimeoutException ex)
@@ -152,6 +148,54 @@ namespace Kirin_Tool.Services
             catch
             {
                 return false;
+            }
+        }
+
+        private static long DumpFileBytes(string savePath)
+        {
+            try
+            {
+                var info = new FileInfo(savePath);
+                return info.Exists ? info.Length : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// D-09: one dump verdict for both verbs. Kept static so the harness can call the same
+        /// rule the service uses (tests/VcomPromptUi).
+        /// </summary>
+        private static DumpVerdictResult JudgeDump(string savePath, long? declaredBytes, string? output) =>
+            DumpVerdict.Evaluate(DumpFileBytes(savePath), declaredBytes, output, null);
+
+        private static string DescribeDump(DumpVerdictResult verdict) =>
+            verdict.Ok
+                ? "file written " + verdict.FileBytes + " byte(s), verdict=" + verdict.Verdict
+                : "no usable file, verdict=" + verdict.Verdict + " (" + verdict.Reason + ")";
+
+        /// <summary>
+        /// D-09: ask the loader how large the partition is. Any failure (verb unsupported, empty
+        /// reply, timeout) yields null - "unknown" is an honest answer, the size half is then
+        /// reported as unchecked by <see cref="DumpVerdict"/>.
+        /// </summary>
+        private async Task<long?> DeclaredPartitionSizeAsync(string partitionName, OperationScope op)
+        {
+            try
+            {
+                var reply = await _fastbootClient.QueryVariableAsync("partition-size:" + partitionName);
+                long? size = DumpVerdict.ParseDeclaredSize(reply?.Output);
+                op.Step(size.HasValue
+                    ? "declared partition size: " + size.Value + " byte(s)"
+                    : OpLog.DegradedPrefix + "declared partition size unknown; the dump size cannot be bounded");
+                return size;
+            }
+            catch (Exception ex)
+            {
+                op.Step(OpLog.DegradedPrefix + "declare-size query failed: " + ex.Message);
+                return null;
             }
         }
 
