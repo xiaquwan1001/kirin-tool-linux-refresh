@@ -35,6 +35,31 @@
   GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
 - **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
 
+## v2.4.25 变更（2026-11-17，主机侧，无设备）
+
+本轮只做「纯主机可验证」的四条，全部是**判据收紧**（wire 命令/时序/重试不变）：
+
+- **D-05 → fixed-in-2.4.25**：GUI 的跳过计数不再进 `successCount`。计数与文案抽到
+  `Services/Verdict/FlashTally.cs`（`skipped` 单列、`attempted = total - skipped`、空计划不算成功），
+  `MainWindow.FlashPartitionsWithProgress` 改用它；断言 `tests/GuiQol`。
+- **D-09 → fixed-in-2.4.25**：dump 判据 = 文件非空 **且** loader 无失败 token **且** 不小于声明分区大小。
+  声明大小取自新增的只读 `getvar partition-size:<name>`（不支持就记 `SizeChecked=false`，不静默跳过），
+  规则在 `Services/Verdict/DumpVerdict.cs`（`file-missing` / `loader-reported-failure` / `file-truncated` /
+  `file-padded` / `file-written`）；`DumpPartitionAsync` 两个 verb 共用；断言 `tests/VcomPromptUi`。
+- **D-10 → fixed-in-2.4.25**：命令输出判据从子串改成**行首 token**（`Services/Verdict/CommandOutput.cs`）：
+  失败 token 两个流都查且失败优先，成功 token 只认 **stdout** 行首（`OKAY [ …]` / `SUCCESS`），其余 `Unknown`。
+  `ProcessResult` 新增 `StandardOutput`/`ErrorOutput`（`Output` 合并串保留以兼容），`ProcessRunner` 填两个流。
+- **D-11 → fixed-in-2.4.25**：oeminfo 转换 0 命中不再是成功。`OemInfoEditor.EditEntriesDetailed` 回传
+  「改写条目数」，`EditEntries` 保留 `byte[]` 签名；`OemInfoService` 对 0 命中出
+  `conversion:no-entry-rewritten` 并不再交出 `ConvertedData`；断言 `tests/OpLogging`。
+- **D-17 → fixed-in-2.4.25**：能力矩阵的未知 SoC 由「全允许」改成「全拒」。白名单唯一来源是 BootROM
+  loader 表 `FirmwareUnlocker.CpuAddresses` + 受限型号 `hisi9000`（`ChipCapabilities.IsKnownChip`）；
+  断言 `tests/Kirin9000`。
+- 冻结面：`tests/StableParity/boundary.json` 只刷新 `MainWindow.axaml.cs` 与 `Services/OemInfoEditor.cs`
+  两个 hash，并在 `reference` 里写清行为变更理由。
+- 验证口径：`dotnet build -c Release Kirin-Tool.sln` 0 error；`tests/suites.txt` **25/25 rc=0**；
+  **未执行任何 adb/fastboot**（除只读 `getvar partition-size` 这条新增代码路径，测试里也没有真设备）。
+
 ## 0. 口径
 
 | 状态 | 含义 |
@@ -87,13 +112,13 @@
 | D-02 | F07 | 所有新写命令共用 `WriteResult`，**无条件**输出 `applied=true, gate="applied", exitCode=0`，即使 `result.success=false` | fixed-in-2.4.15 | `Cli/Commands/DeviceWriteCommands.cs:118-133`。**误判后果**：只读 `applied`/`gate`/`exitCode` 字段的 AI 会把失败写当成功（这是审计 F07 的更严重版本，覆盖面从 flash 扩到全部写命令） |
 | D-03 | F04 残余（CLI/MCP 侧） | `write-sn` 的 CLI/MCP 路径**没有读回比对**，只有 fastboot 退出码 | fixed-in-2.4.15 | `Cli/Commands/DeviceWriteCommands.cs:210` 原文 "no read-back check is available on this path"；GUI 侧已有（§1）。**误判后果**：同一个能力在 GUI 会报「未确认」，在 CLI/MCP 报成功 |
 | D-04 | F10 / S03 / S04 / S06 / S07 / S09 / F13 | USB Update 通道的成功判据仍然虚：握手 3 次失败只写一行日志继续；缺 `.img`/`.img.header`/0 字节的分区 `continue` 且不计失败；读到 0 字节 `break` 后 `return null`（=成功）；`if (success) … else { }` 空分支 | fixed-in-2.4.15 | 五处全部改成显式结论/事件：握手 `DoHandshake` 返回 bool（失败 = `HandshakeEstablished=false` + `degraded:`），缺 `.img`/`.img.header` → `Skipped[]`、0 字节 → `Missing[]`（`skipped:`/`missing:`），`bytesRead==0` → `NoteStreamEndedEarly`（不再是成功），空 `if/else` → `degraded:` 事件。结论三态见 `Services/USBUpdate/UsbUpdateVerdict.cs`，上层映射见 [usb-update-verdict.md](usb-update-verdict.md)；`tests/UsbUpdateVerdict`（39 checks）逐条覆盖；`StableParity` 哈希按「结论模型变化、协议未变」刷新 |
-| D-05 | F03 / S17 | GUI 把被跳过的分区计成成功：`CompletePartition(..., true, "Skipped")` 且 `successCount++` → 「Successfully flashed all N partitions!」恒成立 | open | `MainWindow.axaml.cs:637-638`、`:698-701`。CLI 侧已有 `OtaPlan.Skipped` 单列（`Cli/Commands/OtaFlashRunner.cs:32,212`），GUI 没有 |
+| D-05 | F03 / S17 | GUI 把被跳过的分区计成成功：`successCount++` → 「Successfully flashed all N partitions!」恒成立 | **fixed-in-2.4.25** | 计数与文案抽到 `Services/Verdict/FlashTally.cs`（skipped 单列、`attempted = total - skipped`、空计划不算成功），`MainWindow.axaml.cs` 的 `FlashPartitionsWithProgress` 改用它；跳过行的文案 `"Skipped"` 不变；`tests/GuiQol` 6 条断言 |
 | D-06 | H20 / H23 | pwn 后跳转的 `xloaderStart` 与漏洞 `returnAddr` 仍是 `switch` 里的裸字面量，与 `CpuAddresses` 表分离，无法外置/审查 | open | `Services/VcomFlasher.cs:213-222`、`:239-247`。审计定为「变砖级」字面量，改一个字节即换行为；外置表尚未做 |
 | D-07 | P11 / P12 / P13 / H32 | 找不到随包 fastboot 时**静默**回落到 `/usr/bin/fastboot` → PATH（Google platform-tools 对华为临时 loader 的 `getvar` 全面失败）；`doctor` 的 `ok` 只判「找到 && 能跑」，不判血统 | open | `Services/FastbootClient.cs:78-86`（回落后无警告）；`Cli/Commands/ReadCommands.cs:191`（`ok = fastbootPath != null && fastbootVersion != null`）、`:143-156`（有 per-check 表，无 parity 探针）。**误判后果**：AI 按 `ok:true` 认为环境健康，随后所有读都失败并被归因到「连接问题」 |
 | D-08 | F17 / F18 | `doctor` 的 `ok` 与 `info` 的「连上但一无所知」语义仍未区分 | open | `Cli/Commands/ReadCommands.cs:191`、`:27-36`（`connected` 为真即 exit 0，变量可全空） |
-| D-09 | F09 / S22 | dump 成功判据仍是「文件存在且 >0 字节」，没有与 header 声明大小/分区大小比对 | open | `Services/FastbootFlasherService.cs:92-97`（`info.Exists && info.Length > 0`） |
-| D-10 | F12 / P27 | `ClassifyCommandOutput` 仍按子串判 OKAY/SUCCESS 与 FAIL/ERROR（已补 `NOT ALLOWED`/`NOT SUPPORT`），且匹配的是 stdout+stderr 混流 | open | `MainWindow.axaml.cs:2292-2303`；混流来源 `Utils/ProcessRunner.cs`（`Output = output + error`，S24 未变） |
-| D-11 | F05 | oeminfo 转换「没有任何块命中」时仍 `IsSuccess=true` | open | `Services/OemInfoService.cs:81`；命中条目数/diff 未纳入判定 |
+| D-09 | F09 / S22 | dump 成功判据仍是「文件存在且 >0 字节」，没有与 header 声明大小/分区大小比对 | **fixed-in-2.4.25** | `Services/Verdict/DumpVerdict.cs`（纯函数，三态 + `file-truncated`/`file-padded`/`SizeChecked`）；`DumpPartitionAsync` 先只读 `getvar partition-size:<name>` 取声明大小（不支持 ⇒ unknown，不静默跳过），两个 verb 共用同一判据；`tests/VcomPromptUi` 9 条断言 |
+| D-10 | F12 / P27 | `ClassifyCommandOutput` 仍按子串判 OKAY/SUCCESS 与 FAIL/ERROR，且匹配的是 stdout+stderr 混流 | **fixed-in-2.4.25** | `Services/Verdict/CommandOutput.cs`：失败 token 行首锚定/显式短语、两个流都查且失败优先；成功 token 只认 **stdout** 行首。`Models/ProcessResult.cs` 新增 `StandardOutput`/`ErrorOutput`（`Output` 合并串保留），`Utils/ProcessRunner.cs` 填两流；GUI 委托新判据；`tests/VcomPromptUi` 7 条断言 |
+| D-11 | F05 | oeminfo 转换「没有任何块命中」时仍 `IsSuccess=true` | **fixed-in-2.4.25** | `OemInfoEditor.EditEntriesDetailed` 回传 `ModelEntriesRewritten`/`RegionEntriesRewritten`（`EditEntries` 签名与有效输入的字节都不变）；`OemInfoService` 对 0 命中出 `conversion:no-entry-rewritten`、不交 `ConvertedData`；`tests/OpLogging` 5 条断言 |
 
 ### 2.2 会让 AI 发起本不该发起的动作（可达性 / 闸门缝隙）
 
@@ -104,7 +129,7 @@
 | D-14 | BB-13 / BB-16（GUI 侧） | GUI 仍用相对 CWD 的 `dload`，且开跑前 `Directory.Delete(dload, true)`（无 sentinel 校验） | open | `MainWindow.axaml.cs:159,165`（字面量 `"dload"`）；`Services/USBUpdate/SoftwareTestpointService.cs:46-49` |
 | D-15 | BB-19 | rescue 目标分区仍由 **CPU 下拉** 决定，不读设备真实平台 | open | `MainWindow.axaml.cs:2027`（`RescuePartitionPlan.ForChip(GetSelectedCpu())`） |
 | D-16 | S14 | 电量 <50% 仍只是横幅，任何写路径都不因电量被拒 | open | `MainWindow.ChipCapabilities.cs:72-95` |
-| D-17 | H45 | 能力矩阵仍是「不是 Kirin9000 就全允许」（未知 SoC 默认放行） | open | `Services/ChipCapabilities.cs:8` |
+| D-17 | H45 | 能力矩阵仍是「不是 Kirin9000 就全允许」（未知 SoC 默认放行） | **fixed-in-2.4.25** | `Services/ChipCapabilities.cs`：`IsKnownChip()` 白名单唯一来源 = `FirmwareUnlocker.CpuAddresses` + `hisi9000`；未知 chip 连只读都拒；`NoticeFor()` 不冒充 kirin9000 文案；`tests/Kirin9000` 5 chip × 6 operation 否定断言 |
 | D-18 | P02 / H15 | Linux 自动探测仍按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR（已有 `--port`/`BulkOnly` 逃逸，默认路径未改成能力探测） | open | `Services/VcomFlasher.cs:117-122` |
 | D-19 | H06 / H50 / H51 | loader 目录仍是 `<base>/loaders/<cpu>`：CLI 只有 `--loader-dir` 参数，没有 `KIRIN_LOADERS_DIR`；命名仍是 `<stage>.ktl`/`fastbootf.ktl` | open | `Services/FirmwareUnlocker.cs:89,178`；`Cli/CommandSupport.cs:195-229` |
 | D-20 | P15 | `packaging/publish.sh` 不产出 `loaders/`，但 deb/AppRun 假定它存在 → 打包产物里 VCOM 解锁会报 `Loader directory for <cpu> not found` | open | `packaging/build-deb.sh:5`、`packaging/AppRun:3`（注释假定），`packaging/publish.sh` 内无 `loaders` 拷贝 |
@@ -207,13 +232,13 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | 6 | S10/S11 `--require-backup` 静默失效 | fixed | §1 |
 | 7 | S12 ArgParser 宽松 | fixed | §1 |
 | 8 | F04/S18 写 SN 只看退出码 | GUI fixed / CLI open | §1 + D-03 |
-| 9 | F03/S17 跳过计成功 | GUI open / CLI 部分 | D-05 |
+| 9 | F03/S17 跳过计成功 | GUI fixed / CLI 部分 | D-05 |
 | 10 | F07 `applied:true` 在 0/N 时也出 | open（范围更大） | D-02 |
 | 11 | S03/S04/S05 握手与 reboot 返回值丢弃 | fixed | D-04 |
 | 12 | P11/P12/P14/P13 fastboot 血统 | open | D-07 |
-| 13 | F09/S22 dump 只判 >0 字节 | open | D-09 |
+| 13 | F09/S22 dump 只判 >0 字节 | fixed | D-09 |
 | 14 | S19 `oeminfoerase-disablewp` 结果丢弃 | open | D-01 |
-| 15 | F05 oeminfo 命中 0 条仍成功 | open | D-11 |
+| 15 | F05 oeminfo 命中 0 条仍成功 | fixed | D-11 |
 
 ---
 
