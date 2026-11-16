@@ -2414,19 +2414,23 @@ namespace Kirin_Tool
         /// Classifies one command's output. Failure wins over success (fastboot prints OKAY for
         /// the commands it sent and still appends FAILED when the bootloader refuses), and an
         /// output with neither token is Unknown - never a success.
+        /// Debt D-10: the token rules now live in <see cref="Services.Verdict.CommandOutput"/> so
+        /// they are line-anchored (a "(bootloader) not support: x" banner cannot create a
+        /// verdict) and so a reply read as two streams can keep OKAY/SUCCESS stdout-only.
         /// </summary>
-        private static CommandOutcome ClassifyCommandOutput(string output)
+        private static CommandOutcome ClassifyCommandOutput(string output) =>
+            ToOutcome(Services.Verdict.CommandOutput.Classify(output));
+
+        /// <summary>Same classifier, but the success token must come from stdout.</summary>
+        private static CommandOutcome ClassifyCommandResultOutput(Models.ProcessResult? result) =>
+            ToOutcome(Services.Verdict.CommandOutput.Classify(result));
+
+        private static CommandOutcome ToOutcome(Services.Verdict.CommandOutputVerdict verdict) => verdict switch
         {
-            string upper = (output ?? string.Empty).ToUpperInvariant();
-
-            if (upper.Contains("FAIL") || upper.Contains("ERROR") ||
-                upper.Contains("NOT ALLOWED") || upper.Contains("NOT SUPPORT"))
-                return CommandOutcome.Failed;
-
-            if (upper.Contains("OKAY") || upper.Contains("SUCCESS")) return CommandOutcome.Succeeded;
-
-            return CommandOutcome.Unknown;
-        }
+            Services.Verdict.CommandOutputVerdict.Succeeded => CommandOutcome.Succeeded,
+            Services.Verdict.CommandOutputVerdict.Failed => CommandOutcome.Failed,
+            _ => CommandOutcome.Unknown,
+        };
 
         /// <summary>
         /// Classifies the rescue_enter_recovery read-back. Explicit OKAY/SUCCESS is the primary

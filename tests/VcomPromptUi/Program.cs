@@ -91,6 +91,41 @@ foreach(var (output,expected) in new[]{
 }
 Console.WriteLine("PASS USB Update mode entry classified (Unknown is not reported as success)");
 
+// ---- D-10 (2026-11-17): the same rules pulled out of the GUI as a pure helper, so the two
+// things a GUI screenshot cannot show are checkable here: token anchoring and stdout-only success.
+foreach(var (stdout,stderr,expected) in new (string,string,Kirin_Tool.Services.Verdict.CommandOutputVerdict)[]{
+ ("OKAY [  0.005s]\nFinished. Total time: 0.006s","",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Succeeded),
+ ("","OKAY [  0.001s]",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Unknown),
+ ("(bootloader) support: yes\n",",",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Unknown),
+ ("(bootloader) dump: not support\n","",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Failed),
+ ("(bootloader) product: els-an00","fastboot: error: Command failed",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Failed),
+ ("OKAY","FAILED (remote: 'not support')",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Failed),
+ ("< waiting for any device >","",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Unknown),
+ ("","",Kirin_Tool.Services.Verdict.CommandOutputVerdict.Unknown)})
+{
+ var actual=Kirin_Tool.Services.Verdict.CommandOutput.Classify(stdout,stderr);
+ if(actual!=expected)throw new Exception($"CommandOutput.Classify(stdout='{stdout}', stderr='{stderr}') = {actual}, expected {expected}");
+}
+Console.WriteLine("PASS D-10 command output classifier: failure from either stream, OKAY/SUCCESS only from stdout lines");
+
+// ---- D-09 (2026-11-17): a dump is only a success when it is not truncated.
+foreach(var (bytes,declared,output,ok,verdict) in new (long,long?,string,bool,string)[]{
+ (0,null,"OKAY [  0.001s]",false,"file-missing"),
+ (512,0x6000,"OKAY",false,"file-truncated"),
+ (0x6000,0x6000,"OKAY [  3.000s]",true,"file-written"),
+ (0x6000,0x6000,"FAILED (remote: 'not support')",false,"loader-reported-failure"),
+ (0x6000,null,"OKAY",true,"file-written")})
+{
+ var v=Kirin_Tool.Services.Verdict.DumpVerdict.Evaluate(bytes,declared,output,null);
+ if(v.Ok!=ok||v.Verdict!=verdict)throw new Exception($"DumpVerdict({bytes},{declared},'{output}') = ({v.Ok},{v.Verdict}), expected ({ok},{verdict})");
+}
+if(Kirin_Tool.Services.Verdict.DumpVerdict.Evaluate(512,0x6000,"OKAY",null).SizeChecked!=true)throw new Exception("a known declared size must be reported as checked");
+if(Kirin_Tool.Services.Verdict.DumpVerdict.Evaluate(512,null,"OKAY",null).SizeChecked!=false)throw new Exception("an unknown declared size must be reported as unchecked");
+if(Kirin_Tool.Services.Verdict.DumpVerdict.ParseDeclaredSize("(bootloader) partition-size:oeminfo: 0x6000000")!=0x6000000)throw new Exception("partition-size hex reply not parsed");
+if(Kirin_Tool.Services.Verdict.DumpVerdict.ParseDeclaredSize("FAILED (remote: 'unknown variable')")!=null)throw new Exception("a failed size query must not become a number");
+if(Kirin_Tool.Services.Verdict.DumpVerdict.ParseDeclaredSize("")!=null)throw new Exception("an empty size reply must stay unknown");
+Console.WriteLine("PASS D-09 dump verdict: truncated / loader-failed dumps are not successes, unknown size is named");
+
 // The dead List<PartitionInfo> overload was removed; the live 5-parameter overload stays.
 var flashOverloads=typeof(MainWindow).GetMethods(BindingFlags.Instance|BindingFlags.NonPublic)
     .Where(m=>m.Name=="FlashPartitionsWithProgress").ToArray();

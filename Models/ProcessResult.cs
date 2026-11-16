@@ -32,6 +32,10 @@ namespace Kirin_Tool.Models
         // ProcessRunner always assigns both when it constructs the result; the initializers
         // are for the null-state only and are never observed in practice.
         public string Output { get; set; } = string.Empty;
+        // D-10 / audit S24: the merged text above stays for compatibility, but the streams are
+        // also kept apart so a verdict can require the success token to come from stdout.
+        public string StandardOutput { get; set; } = string.Empty;
+        public string ErrorOutput { get; set; } = string.Empty;
         public string Arguments { get; set; } = string.Empty;
         public bool IsSuccess => ExitCode == 0;
     }

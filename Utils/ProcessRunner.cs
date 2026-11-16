@@ -228,6 +228,8 @@ namespace Kirin_Tool.Utils
                 {
                     ExitCode = process.ExitCode,
                     Output = output + error,
+                    StandardOutput = output,
+                    ErrorOutput = error,
                     Arguments = arguments
                 };
 
