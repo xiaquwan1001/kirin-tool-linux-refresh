@@ -176,6 +176,35 @@ Check(app.RequestedThemeVariant == ThemeVariant.Light && UserSettings.Theme == "
 themed.Close();
 Dispatcher.UIThread.RunJobs();
 
+// D-05 (2026-11-17): a skipped partition is not a written one. The GUI used to increment its
+// success counter for skips, so "Successfully flashed all N partitions!" was printed even when
+// nothing was written.
+{
+    var allSkipped = Kirin_Tool.Services.Verdict.FlashTally.Describe(0, 3, 3);
+    Check(!allSkipped.AllSuccessful, "D-05: all-skipped is not a success");
+    Check(!allSkipped.Message.Contains("Successfully flashed all"), "D-05: all-skipped never claims 'flashed all'");
+    Check(allSkipped.Message.Contains("3 skipped") && allSkipped.AttemptedCount == 0,
+        "D-05: the message names the skipped count and the denominator excludes skips");
+
+    var mixed = Kirin_Tool.Services.Verdict.FlashTally.Describe(2, 1, 3);
+    Check(mixed.AllSuccessful && mixed.AttemptedCount == 2 && mixed.FailedCount == 0,
+        "D-05: two written + one skipped is 'all attempted succeeded'");
+    Check(mixed.Message.Contains("2/2") && mixed.Message.Contains("1 skipped"),
+        "D-05: mixed message says 'Flashed 2/2 partitions; 1 skipped (not written).'");
+
+    var partial = Kirin_Tool.Services.Verdict.FlashTally.Describe(1, 1, 3);
+    Check(!partial.AllSuccessful && partial.FailedCount == 1,
+        "D-05: one written + one failed + one skipped is not a success");
+
+    var clean = Kirin_Tool.Services.Verdict.FlashTally.Describe(3, 0, 3);
+    Check(clean.AllSuccessful && clean.Message == "Successfully flashed all 3 partitions!",
+        "D-05: the no-skip wording is unchanged");
+
+    var nothing = Kirin_Tool.Services.Verdict.FlashTally.Describe(0, 0, 0);
+    Check(!nothing.AllSuccessful, "D-05: an empty plan is not a success");
+    Console.WriteLine("PASS D-05 skipped partitions are reported separately and never counted as successes");
+}
+
 Console.WriteLine("8 GUI QoL checks passed; headless, no device access.");
 return 0;
 

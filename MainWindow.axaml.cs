@@ -638,6 +638,7 @@ namespace Kirin_Tool
         bool allowRedline = false)
         {
             int successCount = 0;
+            int skippedCount = 0;
             int totalCount = selectedPartitions.Count;
             string? lastError = string.Empty;
 
@@ -655,8 +656,11 @@ namespace Kirin_Tool
                     {
                         if (skipSecure)
                         {
+                            // D-05 / audit F03+S17: a skipped partition was never written, so it
+                            // must not enter successCount ("Successfully flashed all N" used to be
+                            // true even when every redline member was skipped).
                             progressDialog.CompletePartition(partition.Name, true, "Skipped");
-                            successCount++;
+                            skippedCount++;
                             continue;
                         }
 
@@ -718,12 +722,8 @@ namespace Kirin_Tool
                 return (false, "Flash operation was cancelled by user");
             }
 
-            bool allSuccessful = successCount == totalCount;
-            string message = allSuccessful
-                ? $"Successfully flashed all {totalCount} partitions!"
-                : $"Flash completed with {successCount}/{totalCount} successful.";
-
-            return (allSuccessful, message);
+            var tally = Services.Verdict.FlashTally.Describe(successCount, skippedCount, totalCount);
+            return (tally.AllSuccessful, tally.Message);
         }
 
         /// <summary>
