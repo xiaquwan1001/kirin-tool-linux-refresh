@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
+using Kirin_Tool.Utils;
 
 namespace Kirin_Tool.Cli.Commands;
 
@@ -180,6 +181,20 @@ internal sealed class DoctorCommand : ICliCommand
         bool informationallyUseful = connected &&
             (probes.Any(pair => pair.Value != null) || psidReadable || partitionCount is > 0);
 
+        // D-18 (audit P02 / H15): which modem-line path a VCOM run would take on this host, and on
+        // what evidence. Read-only: FindPort walks sysfs, it never opens the tty.
+        string? vcomPort = null;
+        string? vcomNote = null;
+        if (OperatingSystem.IsLinux())
+        {
+            try { vcomPort = LinuxSerialPortFinder.FindPort(0x12D1, 0x3609); }
+            catch (AmbiguousSerialDeviceException ex) { vcomNote = ex.Message; }
+            catch (Exception ex) { vcomNote = ex.GetType().Name + ": " + ex.Message; }
+        }
+        ModemLineDecision modemLines = ModemLinePolicy.Decide(
+            OperatingSystem.IsLinux(), explicitPort: false, forcedBulkOnly: null,
+            ModemLinePolicy.ProbeDriver(vcomPort));
+
         // D-07 (audit P11/P12/P13/H32): "found && runs" is not the same as "the client that works".
         // The lineage token is derived from the resolved path (the bundled directory is the only
         // provenance the tool can prove) and, when available, the `--version` line.
@@ -218,6 +233,21 @@ internal sealed class DoctorCommand : ICliCommand
                 runtime = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier,
             },
             fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, parity, devices = fastbootDevices },
+            vcom = new
+            {
+                port = vcomPort,
+                note = vcomNote,
+                modemLines = new
+                {
+                    mode = modemLines.BulkOnly ? "bulk-only" : "rtscts",
+                    origin = modemLines.Origin,
+                    verified = modemLines.Verified,
+                    driver = modemLines.Probe.Driver,
+                    driverKnown = modemLines.Probe.Known,
+                    probeAttempted = modemLines.Probe.Attempted,
+                    reason = modemLines.Reason,
+                },
+            },
             adb = new { found = adbPath != null, path = adbPath, version = adbVersion, devices = adbDevices },
             loaders = new
             {
@@ -256,6 +286,9 @@ internal sealed class DoctorCommand : ICliCommand
             context.Output.WriteLine($"adb:      {adbPath ?? "not found (optional)"}  {(adbVersion != null ? "[" + adbVersion + "]" : string.Empty)}");
             context.Output.WriteLine($"fastboot devices: {(fastbootDevices.Count == 0 ? "(none)" : string.Join(" | ", fastbootDevices))}");
             context.Output.WriteLine($"adb devices:      {(adbDevices.Count == 0 ? "(none)" : string.Join(" | ", adbDevices))}");
+            // D-18: the modem-line path is visible here, not only in the VCOM session log.
+            context.Output.WriteLine($"vcom port:        {vcomPort ?? "not present"}{(vcomNote != null ? "  (" + vcomNote + ")" : string.Empty)}");
+            context.Output.WriteLine($"vcom modem lines: {modemLines.Describe()}");
             context.Output.WriteLine($"loaders: {loaders.Count} chips, {loaders.Sum(entry => entry.Files)} .ktl files in {BundledLoaders.Directory}");
             context.Output.WriteLine($"device: {(connected ? "connected" : "not connected")} chip={chip}");
             foreach (var pair in probes.Where(pair => pair.Value != null))

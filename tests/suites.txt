@@ -30,4 +30,5 @@ VersionMetadata
 BatteryGate
 PwnJumpTable
 SocWriteRequirements
+ModemLinePolicy
 DloadSentinel

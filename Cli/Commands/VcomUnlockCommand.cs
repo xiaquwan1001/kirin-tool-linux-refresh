@@ -121,6 +121,14 @@ internal sealed class VcomUnlockCommand : ICliCommand
             .ToList();
         int presentCount = planned.Count(stage => stage.Exists);
 
+        // D-18 (audit P02 / H15): say which modem-line path the flasher will take and on what
+        // evidence, before a single frame is sent. The flasher re-decides at Connect() time (the
+        // port may not exist yet), but the plan must not be silent about it.
+        string? portArg = args.Value("port") is { Length: > 0 } explicitPort ? explicitPort : null;
+        ModemLineDecision plannedModemLines = ModemLinePolicy.Decide(
+            OperatingSystem.IsLinux(), portArg != null, null,
+            ModemLinePolicy.ProbeDriver(portArg ?? LinuxSerialPortFinder.FindPort(0x12D1, 0x3609)));
+
         bool confirmed = (context.Yes || args.HasFlag("yes")) && !dryRun;
         var planPayload = new
         {
@@ -134,6 +142,15 @@ internal sealed class VcomUnlockCommand : ICliCommand
             replug = ReplugName(replug, replugWaitSeconds),
             stageSelection = StageName(stages),
             useFastFlashLoader = useFastFlash,
+            modemLines = new
+            {
+                mode = plannedModemLines.BulkOnly ? "bulk-only" : "rtscts",
+                origin = plannedModemLines.Origin,
+                verified = plannedModemLines.Verified,
+                driver = plannedModemLines.Probe.Driver,
+                driverKnown = plannedModemLines.Probe.Known,
+                reason = plannedModemLines.Reason,
+            },
             stageCount = planned.Count,
             presentStages = presentCount,
             missingStages = planned.Count - presentCount,
@@ -182,7 +199,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
                 });
             else
             {
-                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages);
+                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages, plannedModemLines);
                 context.Output.WriteLine();
                 context.Output.WriteLine($"gate: plan-only (exit {ExitCodes.Gated})");
                 context.Output.WriteLine("re-run with --yes (CLI) or confirm:true (MCP) to really upload the loaders.");
@@ -241,7 +258,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
 
         var flasherOptions = new VcomFlasherOptions
         {
-            PortName = args.Value("port") is { Length: > 0 } portArg ? portArg : null,
+            PortName = portArg,
             AckMode = ackMode,
             AckTimeout = ackTimeout,
             Logger = logger,
@@ -470,11 +487,14 @@ internal sealed class VcomUnlockCommand : ICliCommand
 
     private static void WritePlanText(CliContext context, string cpu, string loaderDirectory,
         IReadOnlyList<(string Stage, string File, int Address, bool PwnFlag, bool Exists)> planned,
-        VcomAckMode ackMode, ReplugPolicy replug, int replugWaitSeconds, UnlockStageSelection stages)
+        VcomAckMode ackMode, ReplugPolicy replug, int replugWaitSeconds, UnlockStageSelection stages,
+        ModemLineDecision modemLines)
     {
         context.Output.WriteLine($"vcom unlock plan for {cpu}");
         context.Output.WriteLine($"loader directory: {loaderDirectory}");
         context.Output.WriteLine($"ack mode: {AckModeName(ackMode)}   replug: {ReplugName(replug, replugWaitSeconds)}   stage-only: {StageName(stages)}");
+        // D-18: the modem-line path is part of the plan, with its evidence.
+        context.Output.WriteLine($"modem lines: {modemLines.Describe()}");
         context.Output.WriteLine("would upload, in order (device must already be in VCOM mode unless --stage-only rest):");
         context.Output.WriteLine(TextFormat.Table(planned.Select(stage => new[]
         {

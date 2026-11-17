@@ -155,6 +155,24 @@ namespace Kirin_Tool.Utils
             return false;
         }
 
+        /// <summary>
+        /// D-18: the resolved kernel driver name of a tty (the nearest `driver` link below the USB
+        /// device), or null when there is no such link. Read-only: it only walks sysfs, never opens
+        /// the tty, so probing cannot disturb a running transfer.
+        /// </summary>
+        public static string? GetPortDriverName(string port, string ttyClassRoot = "/sys/class/tty")
+        {
+            for (var directory = ResolveSerialDevice(port, ttyClassRoot); directory != null; directory = directory.Parent)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "idVendor"))) break;
+                var driver = new DirectoryInfo(Path.Combine(directory.FullName, "driver"));
+                if (!driver.Exists) continue;
+                string? name = driver.ResolveLinkTarget(true)?.Name;
+                if (!string.IsNullOrEmpty(name)) return name;
+            }
+            return null;
+        }
+
         private static bool MatchesUsbIdentity(DirectoryInfo usbDevice, int vendorId, int? productId)
         {
             string? vendor = ReadAttribute(usbDevice, "idVendor");

@@ -56,8 +56,17 @@ namespace Kirin_Tool.Services
     {
         /// <summary>Explicit tty/COM path; skips the 12d1:3609 enumeration.</summary>
         public string? PortName { get; init; }
-        /// <summary>Force the bulk-only framing (no modem-line signalling). Default: explicit port → true, auto-detect → option driver check.</summary>
+        /// <summary>
+        /// Force the bulk-only framing (no modem-line signalling). Default: explicit port → true,
+        /// auto-detect → the D-18 capability probe in <see cref="ModemLinePolicy"/>.
+        /// </summary>
         public bool? BulkOnly { get; init; }
+        /// <summary>
+        /// D-18: driver-name probe used by the Linux modem-line decision. Left null it reads sysfs
+        /// (<see cref="Kirin_Tool.Utils.LinuxSerialPortFinder.GetPortDriverName"/>); tests inject a
+        /// fake. A throwing probe is recorded, never fatal.
+        /// </summary>
+        public Func<string, string?>? DriverProbe { get; init; }
         /// <summary>
         /// ACK policy. The class default stays <c>Lenient</c> because the GUI builds these
         /// options without setting it (the GUI must keep its historical "read it, never fail
@@ -96,6 +105,14 @@ namespace Kirin_Tool.Services
 
         public string? OpenPortName { get; private set; }
 
+        /// <summary>
+        /// D-18: which modem-line path this flasher actually took, and on what evidence. Null until
+        /// a <see cref="Connect"/> succeeded; callers (CLI plan, doctor, session log) report it so
+        /// "connected, then the first frame dies" is never again indistinguishable from a cable
+        /// problem.
+        /// </summary>
+        public ModemLineDecision? ModemLines { get; private set; }
+
         public int FramesSent { get; private set; }
         public int AckExpected { get; private set; }
         public int AckOk { get; private set; }
@@ -121,28 +138,51 @@ namespace Kirin_Tool.Services
             // Linux option maps DTR to CDC SET_CONTROL_LINE_STATE. The captured
             // 12d1:3609 BootROM stalls that request (EPIPE), before any packet is
             // sent. This USB bulk endpoint needs no UART modem-line signalling.
-            // Keep Windows and other drivers on their original settings. An explicit
-            // port is treated the same way (pty/fake devices have no modem lines).
-            bool bulkOnly = _options.BulkOnly ??
-                (OperatingSystem.IsLinux() &&
-                 (_options.PortName != null || LinuxSerialPortFinder.IsPortUsingDriver(portName, "option")));
+            //
+            // D-18 (audit P02 / H15): the decision used to be "is the driver literally
+            // option?" with modem lines for every other answer - including "the probe found
+            // no driver at all". It now comes from ModemLinePolicy, which records *why* it
+            // chose a path (driver evidence / capability assumption / forced / explicit port)
+            // so the log and doctor can show which one ran.
+            DriverProbeResult driverProbe = ModemLinePolicy.ProbeDriver(portName, _options.DriverProbe);
+            ModemLineDecision decision = ModemLinePolicy.Decide(
+                OperatingSystem.IsLinux(), _options.PortName != null, _options.BulkOnly, driverProbe);
             // Close any previously opened instance first so a repeated
             // Connect() (e.g. after replug) is idempotent instead of throwing
             // "access denied" on a still-held port handle.
             Dispose();
 
-            var serialPort = new SerialPort(portName, 115200)
-            {
-                Handshake = bulkOnly ? Handshake.None : Handshake.RequestToSend,
-
-                DtrEnable = !bulkOnly,
-
-                ReadTimeout = 10000,
-                WriteTimeout = 10000
-            };
+            SerialPort serialPort = CreatePort(portName, decision.BulkOnly);
             try
             {
                 serialPort.Open();
+            }
+            catch (IOException ex) when (decision.Origin == ModemLinePolicy.OriginCapabilityProbe)
+            {
+                // The clearing path was an unverified (or unavailable) capability assumption.
+                // Falling back to the historical modem-line settings changes no wire byte, and
+                // the fallback is recorded instead of being guessed from the driver name.
+                serialPort.Dispose();
+                decision = decision with
+                {
+                    Mode = ModemLineMode.ModemLines,
+                    Origin = "probe-fallback",
+                    Reason = "clearing RTS/DTR could not be confirmed to open the port (" + ex.Message
+                             + "); fell back to the historical Handshake.RequestToSend + DTR settings",
+                };
+                _options.Logger?.Event("port.modem-lines",
+                    ("port", portName), ("mode", "modem-lines"), ("origin", decision.Origin),
+                    ("verified", false), ("reason", decision.Reason), ("error", ex.Message));
+                serialPort = CreatePort(portName, bulkOnly: false);
+                try
+                {
+                    serialPort.Open();
+                }
+                catch
+                {
+                    serialPort.Dispose();
+                    throw;
+                }
             }
             catch
             {
@@ -152,14 +192,32 @@ namespace Kirin_Tool.Services
             }
             _serialPort = serialPort;
             OpenPortName = portName;
+            ModemLines = decision;
             _options.Logger?.Event("port.open",
                 ("port", portName),
                 ("explicit", _options.PortName != null),
-                ("bulkOnly", bulkOnly),
-                ("handshake", bulkOnly ? "none" : "rtscts"),
+                ("bulkOnly", decision.BulkOnly),
+                ("handshake", decision.BulkOnly ? "none" : "rtscts"),
+                ("modemLines", decision.BulkOnly ? "bulk-only" : "rtscts"),
+                ("modemLinesOrigin", decision.Origin),
+                ("modemLinesVerified", decision.Verified),
+                ("driver", driverProbe.Driver),
+                ("driverKnown", driverProbe.Known),
+                ("probeAttempted", driverProbe.Attempted),
+                ("probeError", driverProbe.Error),
+                ("modemLinesReason", decision.Reason),
                 ("ackMode", _options.AckMode.ToString().ToLowerInvariant()),
                 ("ackTimeoutMs", (int)_options.AckTimeout.TotalMilliseconds));
         }
+
+        /// <summary>115200 8N1 with either the historical modem-line settings or none at all.</summary>
+        private static SerialPort CreatePort(string portName, bool bulkOnly) => new(portName, 115200)
+        {
+            Handshake = bulkOnly ? Handshake.None : Handshake.RequestToSend,
+            DtrEnable = !bulkOnly,
+            ReadTimeout = 10000,
+            WriteTimeout = 10000,
+        };
 
         public async Task ReconnectAfterCableAsync()
         {
