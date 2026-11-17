@@ -32,7 +32,11 @@ void Test(string name,string? m,string? v,string? f,string expected) {
     if(unhandled!=null)throw new Exception(name+": UI exception",unhandled);
     var dialog=owner.OwnedWindows.SingleOrDefault();
     if(dialog?.Title!="Input Error" || !dialog.GetVisualDescendants().OfType<TextBlock>().Any(t=>t.Text==expected))
-        throw new Exception(name+": expected input validation dialog");
+        throw new Exception(name+": expected input validation dialog [observed] owned="
+            +owner.OwnedWindows.Count
+            +" title="+(dialog?.Title??"<none>")
+            +" texts=["+string.Join("|",dialog?.GetVisualDescendants().OfType<TextBlock>().Select(t=>t.Text)??System.Array.Empty<string>())+"]"
+            +" unhandled="+(unhandled?.Message??"<none>"));
     dialog.Close();Dispatcher.UIThread.RunJobs();
     Console.WriteLine("PASS "+name);
 }
