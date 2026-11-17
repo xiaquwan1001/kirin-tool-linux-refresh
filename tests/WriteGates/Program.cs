@@ -605,6 +605,56 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         await goodClient.OemCommandAsync("dump-storage nvm \"" + Path.Combine(stubDir, "nvm.img") + "\"");
         string[] goodCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
         Check(goodCalls.Any(line => line.Contains("dump-storage")), "a named device still dumps (dump-storage allowed)");
+
+        // 10e. argv list overload (audit round5 §10): the same command as tokens. The child must
+        // receive exactly the argv the quoted string form produced (a host path with a space stays
+        // one argument), a leading "oem" token must not be doubled, and the read gate must judge the
+        // same token list the child gets.
+        Environment.SetEnvironmentVariable("STUB_MODE", "ok");
+        var overloadClient = new FastbootClient(stub);
+        string spacedPath = Path.Combine(stubDir, "list form.img");
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync(new[] { "dump-emmc", "ptable", spacedPath });
+        string[] listCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync("dump-emmc ptable \"" + spacedPath + "\"");
+        string[] stringCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        // Only the oem invocation is compared: the two clients have their own identity cache, so the
+        // number of getvar probes may differ, but the command that reaches the child must not.
+        string[] listOemCalls = listCalls.Where(line => line.StartsWith("oem ", StringComparison.Ordinal)).ToArray();
+        string[] stringOemCalls = stringCalls.Where(line => line.StartsWith("oem ", StringComparison.Ordinal)).ToArray();
+        Check(listOemCalls.Length == 1 && listOemCalls.SequenceEqual(stringOemCalls),
+            "the argv list overload sends exactly the same child argv as the quoted single-string form ("
+            + string.Join(" | ", listOemCalls) + " vs " + string.Join(" | ", stringOemCalls) + ")");
+        Check(listCalls.Any(line => line.Contains("dump-emmc") && line.Contains("list form.img")),
+            "a host path containing a space stays one argument in the list form");
+
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync(new[] { "oem", "dump-storage", "nvm", spacedPath + "2" });
+        string[] prefixedCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(prefixedCalls.Any(line => line.StartsWith("oem dump-storage", StringComparison.Ordinal)),
+            "a leading 'oem' token is accepted and not doubled (" + string.Join(" | ", prefixedCalls) + ")");
+        Check(!prefixedCalls.Any(line => line.Contains("oem oem", StringComparison.Ordinal)),
+            "the child argv never carries a doubled 'oem' prefix");
+
+        bool emptyRefused = false;
+        try { await overloadClient.OemCommandAsync(Array.Empty<string>()); } catch (ArgumentException) { emptyRefused = true; }
+        Check(emptyRefused, "an empty argv list is a usage error, not a bare 'fastboot oem'");
+        bool bareOemRefused = false;
+        try { await overloadClient.OemCommandAsync(new[] { "oem" }); } catch (ArgumentException) { bareOemRefused = true; }
+        Check(bareOemRefused, "a list that is only 'oem' is a usage error, not a bare 'fastboot oem'");
+
+        // The read gate is applied to the list form on the tokens the child will get.
+        Environment.SetEnvironmentVariable("STUB_MODE", "bad-product");
+        var overloadRefusedClient = new FastbootClient(stub);
+        File.Delete(callLog);
+        bool overloadRefused = false;
+        try { await overloadRefusedClient.OemCommandAsync(new[] { "dump-emmc", "ptable", spacedPath }); }
+        catch (Kirin_Tool.Services.DeviceIdentityGate.DeviceIdentityRefusedException) { overloadRefused = true; }
+        Check(overloadRefused, "the argv list form is gated by the same read identity probe");
+        string[] overloadRefusedCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(!overloadRefusedCalls.Any(line => line.Contains("dump-emmc")),
+            "an invalid identity sends zero dump commands through the list form");
     }
     finally
     {

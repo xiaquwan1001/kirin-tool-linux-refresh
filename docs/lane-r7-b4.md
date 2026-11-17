@@ -128,10 +128,108 @@ dotnet run --project tests/SurfaceParity -> 430 surface parity checks passed.
 > chunk header（`0xcac1u`+ushort+uint+uint），与它自己声明的 `ChunkHeaderSize=12` 不一致；
 > 旧断言只关心「被拒绝」，所以一直没暴露。新加的正例改用 `SparseDeclared`（12 字节 header + 真 payload）。
 
-## 3. `oem dump-emmc` argv 列表重载
+## 3. `oem dump-emmc` argv 列表重载（round5 §10 遗留）
 
-（未开始）
+**判据（改前）**：`FastbootClient.OemCommandAsync(string command, ...)` 只有**单字符串**形式：
+调用点自己拼 `"dump-emmc ptable \"" + path + "\""`（`FastbootFlasherService` 的 dump 路径、
+`PullOemInfo`、`CancelDump` 等），网关与 op 日志再靠 `OperationLogger.ParseArgv` 把字符串**反解**
+成 argv。路径里带空格/引号时，反解结果与实际下达的命令是否同一份 token 只能靠解析器保证
+（`tests/OpLogging` 里就有 `oem dump-emmc oeminfo "/tmp/a b.bin"` 的三 token 断言）。
 
-## 4. 全量验证输出
+**处置**（`Services/FastbootClient.cs`）：
 
-（未开始）
+- 新增 `OemCommandAsync(IReadOnlyList<string> argv, int timeoutMinutes = 300)`：token 逐个进
+  `ProcessRunner` 的 `ArgumentList`（不经 shell、不再二次切分），可接受并**剥掉**开头的 `oem`
+  token（不会出现 `oem oem`），空列表 / 只有 `oem` 都是 `ArgumentException`（不退化成裸
+  `fastboot oem`）。
+- 单字符串重载改为 **`ParseArgv(command)` → 委托给列表重载**：两条入口共用同一段
+  「读闸门判定 + 组 argv + op 命名 + 执行」代码，不可能出现「闸门看的是 A、设备收到的是 B」。
+- 读闸门（R1，`IsDevicePullingCommand`）与 op 名（`fastboot.oem.<subcommand>`）改为对
+  **同一份 token 列表**判定；`FirstWord` 拆成 string 版（转发）与 list 版。
+
+**行为保持**：单 argv 形式的语义与之前一致——同一字符串解析出的 token 发送到子进程
+（`tests/WriteGates` 10e 用 stub 逐字节比对两种形式的子进程 argv：完全相同），
+已有调用点（`FastbootFlasherService` dump、`PullOemInfo`）一行未改、继续走单字符串重载。
+
+**证据（真跑）**：
+
+```
+PASS the argv list overload sends exactly the same child argv as the quoted single-string form
+     (oem dump-emmc ptable .../list form.img vs oem dump-emmc ptable .../list form.img)
+PASS a host path containing a space stays one argument in the list form
+PASS a leading 'oem' token is accepted and not doubled
+PASS the child argv never carries a doubled 'oem' prefix
+PASS an empty argv list is a usage error, not a bare 'fastboot oem'
+PASS a list that is only 'oem' is a usage error, not a bare 'fastboot oem'
+PASS the argv list form is gated by the same read identity probe
+PASS an invalid identity sends zero dump commands through the list form
+-> WriteGates: 172 write gate checks passed.
+```
+
+## 4. 全量验证输出（真跑，最后一条改完后重跑）
+
+```
+$ dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false
+    0 个警告
+    0 个错误
+已用时间 00:00:01.14
+
+$ dotnet build KirinTool.Cli/KirinTool.Cli.csproj -c Release -p:NuGetAudit=false
+    0 个警告
+    0 个错误
+已用时间 00:00:01.80
+```
+
+`tests/suites.txt` 25/25（每行 = `dotnet run --project tests/<name> -c Release` 的结论）：
+
+```
+== FlashPolicy      PASS (55 flash policy checks passed.)
+== StableParity     PASS (35 stable parity checks passed; no hardware accessed.)
+== FastbootReads    PASS (last line: PASS partial failed table)
+== VcomPromptUi     PASS (last line: PASS dead FlashPartitionsWithProgress(List<PartitionInfo>) overload removed)
+== GuiQol           PASS (8 GUI QoL checks passed; headless, no device access.)
+== Extractor        PASS (43 extractor checks passed.)
+== UsbDiagnostics   PASS (49 USB diagnostic checks passed; simulated transport only.)
+== UsbRedlineGate   PASS (13 redline gate checks passed; no device accessed.)
+== UsbTransport     PASS (last line: PASS extractor: the refused entry left nothing behind inside either)
+== UsbUpdateUi      PASS (last line: PASS rendered rows, reboot success/failure and completion controls; sources=True)
+== UsbUpdateVerdict PASS (all 39 USB-update verdict checks passed)
+== OemInfoUi        PASS (5 OEMInfo UI checks passed; headless, no device access.)
+== UdevNotice       PASS (24 udev notice checks passed; no host rule writes or USB operations.)
+== Kirin9000        PASS (102 Kirin9000/PSID checks passed; no device operations.)
+== WriteGates       PASS (172 write gate checks passed.)
+== McpProtocol      PASS (17 MCP protocol checks passed.)
+== OtaPlan          PASS (20 ota plan checks passed.)
+== PreOpBackup      PASS (BackupPlan: all checks passed)
+== SurfaceParity    PASS (430 surface parity checks passed.)
+== OpLogging        PASS (168 operation-logging checks passed; no device, fastboot or adb was contacted.)
+== LogMerge         PASS (79 log-merge checks passed; no device, fastboot or adb was contacted.)
+== VcomUnlockCli    PASS (98 VCOM unlock parity checks passed; no hardware accessed.)
+== ApprovalGate     PASS (114 approval-gate checks passed.)
+== VerdictHonesty   PASS (81 verdict-honesty checks passed; no hardware accessed.)
+== VersionMetadata  PASS (7 version-metadata checks passed; no device was contacted.)
+```
+
+**没有 FAIL**（0 条），因此不存在「是我引入的还是既有问题」的判定。
+
+## 5. 纪律自查
+
+| 纪律 | 执行情况 |
+| :--- | :--- |
+| 工作目录 = worktree、先 `git status` 干净 | `fix/r7-b4-surface` @ `cd060f8`，起始 `git status --porcelain` 为空 |
+| 无任何真实设备操作 | 未执行 adb / fastboot / VCOM / 串口 / usb 探针；`VcomOpenProbe`/`UsbUpdateProbe` 全程未跑；测试只用 stub 脚本与纯函数 |
+| 不碰 loaders/、payload 二进制、硬件 blob | 未触碰（`git status` 只含本文件与源码/测试/文档） |
+| 不改串口时序/协议命令 | USB 通道、VCOM 帧、fastboot 命令序列一行未改 |
+| 不改 `docs/debt-register.md` | 未改（状态列留给编排者） |
+| 冻结面只做行为保持型改动 | `Utils/SuperMerger.cs` 一个 hash 刷新（§2 已写理由）；其余 12 个冻结文件 hash 未动，`StableParity` 35/35 通过 |
+| 报告先建骨架、逐条追加 | `docs/lane-r7-b4.md` 先落骨架，D-12/M2/argv 各一条完成后立即追加 |
+| 一债一 commit | `9f13dd9`（D-12）、`b5d6384`（M2）、第三条见下 |
+| 每条完成即跑针对性验证，最后跑全量 | 见各节「证据」与 §4 |
+
+**提交**：
+
+```
+9f13dd9 fix(surface): usb-update-flash 补 CLI/MCP 面（D-12 / BB-09）
+b5d6384 fix(merge): sparse TotalBlocks 与 chunk 块数一致性校验（M2 / audit §1.2）
+8bd2c72 fix(fastboot): oem 命令补 argv 列表重载（round5 §10）
+```
