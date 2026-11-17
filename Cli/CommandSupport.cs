@@ -235,10 +235,20 @@ internal static class ToolProbe
     }
 }
 
-/// <summary>Bundled VCOM loader inventory (read-only inspection of loaders/).</summary>
+/// <summary>
+/// VCOM loader inventory (read-only inspection of the resolved loader root).
+/// D-19: the root now comes from <see cref="Kirin_Tool.Services.LoaderDirectory"/>
+/// (<c>--loader-dir</c> &gt; <c>KIRIN_LOADERS_DIR</c> &gt; <c>&lt;program dir&gt;/loaders</c>), and the
+/// resolution - directory <b>and</b> where it came from - is printable.
+/// </summary>
 internal static class BundledLoaders
 {
-    public static string Directory => Path.Combine(AppContext.BaseDirectory, "loaders");
+    /// <summary>Resolved loader root for this process (honours <c>KIRIN_LOADERS_DIR</c>).</summary>
+    public static string Directory => Kirin_Tool.Services.LoaderDirectory.ResolveFromEnvironment(null, AppContext.BaseDirectory).Root;
+
+    /// <summary>Where the root came from: <c>--loader-dir</c> / <c>KIRIN_LOADERS_DIR</c> / <c>default</c>.</summary>
+    public static Kirin_Tool.Services.LoaderDirectoryResolution Resolve(string? argument = null, string? workingDirectory = null) =>
+        Kirin_Tool.Services.LoaderDirectory.ResolveFromEnvironment(argument, AppContext.BaseDirectory, workingDirectory);
 
     public static IReadOnlyList<(string Chip, int Files)> Inventory()
     {
@@ -263,9 +273,8 @@ internal static class BundledLoaders
         string chipDirectory = Path.Combine(loaderRoot ?? Directory, chip);
         return stages.Select(stage =>
         {
-            string file = useFastFlashLoader && stage.Name == "FASTBOOT"
-                ? "fastbootf.ktl"
-                : stage.Name.ToLowerInvariant() + ".ktl";
+            // The naming rule (<stage>.ktl / fastbootf.ktl) is frozen and lives in LoaderDirectory.
+            string file = Kirin_Tool.Services.LoaderDirectory.StageFileName(stage.Name, useFastFlashLoader);
             bool exists = File.Exists(Path.Combine(chipDirectory, file));
             return (stage.Name, file, stage.Address, stage.PwnFlag, exists);
         }).ToList();

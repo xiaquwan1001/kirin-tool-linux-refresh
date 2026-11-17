@@ -28,6 +28,9 @@
     <AvaloniaXaml Remove="KirinTool.Cli/**" />
     <None Remove="KirinTool.Cli/**" />
     <Content Include="logo.ico" />
+    <!-- D-22: the packaged udev rule text is the single source UdevRuleNotice prints, so embed the
+         very file the packages install instead of keeping a second copy in C#. -->
+    <EmbeddedResource Include="packaging/51-kirin-tool-fastboot.rules" LogicalName="KirinTool.51-kirin-tool-fastboot.rules" />
     <AvaloniaResource Include="Assets/Fonts/*.ttf" />
     <Content Include="Assets/Fonts/LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="fastboot/payload">

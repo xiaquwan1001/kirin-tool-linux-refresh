@@ -8,9 +8,29 @@
 没有证据的条目不写「已修」——不确定的一律标 `unknown` 并写清缺什么证据。
 
 
-## v3.1.0 变更（主机侧，无设备）
+## v3.1.0 变更（2026-11-17，主机侧，无设备）
 
-本轮只做**判据/可观测性**清偿（wire 命令、时序、重试次数不变）：
+本轮把 **D-18…D-27 十条全部清偿**，三条 lane 并行（L1 判据/聚合、L2 loader/打包/端口/名单、L3 MCP/去重/GUI）。
+全部只动判据、可观测性与 GUI 收尾，**wire 命令、时序、重试次数一个字节未动**，也**未连接任何设备**
+（无 adb/fastboot/lsusb/串口读写；测试里的 fastboot 全是 stub）。
+
+### L2 lane（D-26 / D-18 / D-19 / D-20 / D-22）
+
+- **D-26 → fixed-in-3.1.0**：拔插线/关写保护的 SoC 名单收敛到 `Services/SocWriteRequirements.cs`（唯一来源 +
+  只读集合），三个消费点（GUI 服务、GUI oeminfo 分支、CLI）全部改调它；`tests/SocWriteRequirements`（118 checks）。
+- **D-18 → fixed-in-3.1.0**：Linux modem-line 判据从「驱动名 == option」改成 `Services/ModemLinePolicy.cs` 的能力
+  探测（证据 / 未证实假设 / 强制 / 显式端口 四分），未证实的清线路径 open 失败时回退历史设置并记录；
+  `port.open`、`doctor.vcom.modemLines`、`vcom-unlock` 计划三处可观测；`tests/ModemLinePolicy`（49 checks）。
+- **D-19 → fixed-in-3.1.0**：`KIRIN_LOADERS_DIR` 落地（`--loader-dir` > env > 默认），解析来源成为可打印字段
+  （`loaderDirectorySource`、`doctor.loaders.source`）；冻结面（`<root>/<cpu>/<stage>.ktl`、`fastbootf.ktl`）
+  未改，命名规则单一化到 `LoaderDirectory.StageFileName`；`tests/LoaderDirectory`（104 checks）。
+- **D-20 → fixed-in-3.1.0**：先核对事实（`loaders/` 本来就由 csproj 的 Content glob 带进 publish 树；本机实跑
+  publish.sh rc=0，18 chips / 56 .ktl），再把「必须存在」变成构建期断言 `packaging/check-loaders.sh`
+  （publish.sh 后置、build-deb.sh 前置、PKGBUILD check()、AppRun 注释）；`tests/LoaderPackaging`（48 checks）。
+- **D-22 → fixed-in-3.1.0**：udev 规则收敛成跟包走的单一文本（嵌入资源，`GROUP="uucp"` + `TAG+="uaccess"`，
+  deb 不再 sed 改写），检查改成「规则文本 + 当前会话上下文」两段结论并给可操作提示；`tests/UdevNotice`（51 checks）。
+
+### L3 lane（D-21 / D-27 / D-23）
 
 - **D-21 → fixed-in-3.1.0**（P21）：MCP 的 `initialize` 不再回显固定版本。
   `Cli/Mcp/McpProtocol.cs` 是版本常量的唯一出处（`LatestVersion` + `SupportedVersions` + `Negotiate`），
@@ -45,7 +65,6 @@
   `tests/StableParity/boundary.json` 的 `MainWindow.axaml.cs` hash 已刷新，`reference` 写明理由（wire 命令/时序/重试未变）。
 - 验证：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 全量 rc=0。
 
-
 ### L1 lane 追加（D-25 / D-24）
 
 本轮只做「失败 / 不支持 / 超时」与「聚合语义」这两类判据收紧：wire 命令、时序、重试与 GUI 行为都不变，
@@ -74,6 +93,9 @@
 - 验证口径：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；
   `tests/suites.txt` 全量 PASS；**未执行任何 adb/fastboot**（测试里的 fastboot 全是 stub；
   本轮没有真机动作）。
+
+- **冻结面**：本轮共刷新 `Services/FirmwareUnlocker.cs`、`Services/VcomFlasher.cs`、`MainWindow.axaml.cs` 三个 hash，`tests/StableParity/boundary.json` 的 `reference` 逐条写明行为变更理由（结论/来源字段，协议未变）。
+- 验证口径：两个 `dotnet build` 0 error；`tests/suites.txt` 全量 0 FAIL（新增 6 套：CommandOutcomes / KnowledgeDedup / SocWriteRequirements / ModemLinePolicy / LoaderDirectory / LoaderPackaging）；**未执行任何 adb/fastboot**。
 
 ## v2.4.15 变更（2026-11-13）
 
@@ -222,15 +244,15 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-15 | BB-19 | rescue 目标分区仍由 **CPU 下拉** 决定，不读设备真实平台 | **fixed-in-2.4.26** | `MainWindow.axaml.cs:2027`（`RescuePartitionPlan.ForChip(GetSelectedCpu())`） |
 | D-16 | S14 | 电量 <50% 仍只是横幅，任何写路径都不因电量被拒 | **fixed-in-2.4.26** | `MainWindow.ChipCapabilities.cs:72-95` |
 | D-17 | H45 | 能力矩阵仍是「不是 Kirin9000 就全允许」（未知 SoC 默认放行） | **fixed-in-2.4.25** | `Services/ChipCapabilities.cs`：`IsKnownChip()` 白名单唯一来源 = `FirmwareUnlocker.CpuAddresses` + `hisi9000`；未知 chip 连只读都拒；`NoticeFor()` 不冒充 kirin9000 文案；`tests/Kirin9000` 5 chip × 6 operation 否定断言 |
-| D-18 | P02 / H15 | Linux 自动探测仍按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR（已有 `--port`/`BulkOnly` 逃逸，默认路径未改成能力探测） | open | `Services/VcomFlasher.cs:117-122` |
-| D-19 | H06 / H50 / H51 | loader 目录仍是 `<base>/loaders/<cpu>`：CLI 只有 `--loader-dir` 参数，没有 `KIRIN_LOADERS_DIR`；命名仍是 `<stage>.ktl`/`fastbootf.ktl` | open | `Services/FirmwareUnlocker.cs:89,178`；`Cli/CommandSupport.cs:195-229` |
-| D-20 | P15 | `packaging/publish.sh` 不产出 `loaders/`，但 deb/AppRun 假定它存在 → 打包产物里 VCOM 解锁会报 `Loader directory for <cpu> not found` | open | `packaging/build-deb.sh:5`、`packaging/AppRun:3`（注释假定），`packaging/publish.sh` 内无 `loaders` 拷贝 |
+| D-18 | P02 / H15 | Linux 自动探测曾按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR | **fixed-in-3.1.0** | 判据抽到 `Services/ModemLinePolicy.cs`（`Decide(isLinux, explicitPort, forcedBulkOnly, DriverProbeResult)` → `ModemLineDecision{Mode, Origin, Reason, Probe, Verified}`）；Linux 默认一律先「清 RTS/DTR（bulk-only）」，`origin=driver-option` 才算已证实，其它驱动/探不到驱动记 `origin=capability-probe, verified=false`，open 失败时**回退一次**到历史 modem-line 设置并写 `port.modem-lines` 事件（不猜）。可观测：`port.open` 事件带 `modemLines/modemLinesOrigin/modemLinesVerified/driver/driverKnown/probeError`（`Services/VcomFlasher.cs` `Connect`）、`doctor` 新增 `vcom.modemLines`（文本一行 `vcom modem lines:`）、`vcom-unlock` 计划 JSON+文本都带该结论（`Cli/Commands/ReadCommands.cs`、`Cli/Commands/VcomUnlockCommand.cs`）。逃逸不变：`BulkOnly`/`--port` 仍强制。断言：`tests/ModemLinePolicy`（49 checks：8 种决策 + `Describe()` 契约 + 假 sysfs 驱动探测 + 源码扫描） |
+| D-19 | H06 / H50 / H51 | loader 目录解析曾只有 `--loader-dir`（无环境变量），目录/文件名规则散在 3 处 | **fixed-in-3.1.0** | 解析与命名收敛到 `Services/LoaderDirectory.cs`：优先级 **`--loader-dir` > `KIRIN_LOADERS_DIR` > `<program dir>/loaders`**（空串/纯空白不算来源），`LoaderDirectoryResolution{Path→Root, Source, SourceName, RawValue}` 带出来源；冻结面**未改**：仍是 `<root>/<cpu>/<stage>.ktl` + `fastbootf.ktl`（`StageFileName` 是唯一实现，`FirmwareUnlocker`/`LoaderPrecheck`/`BundledLoaders.Plan` 都改调它）。消费点：`Cli/CommandSupport.cs`（`BundledLoaders.Directory/Resolve`）、`Services/FirmwareUnlocker.cs`（GUI 默认根也读环境变量）、`Cli/Commands/VcomUnlockCommand.cs`（计划 JSON 加 `loaderDirectorySource`、文本打印 `(source: …)`）、doctor 的 `loaders.source`/`sourceValue` 与 `loaders-bundled` 检查详情。断言：`tests/LoaderDirectory`（104 checks：优先级/空值/相对路径/冻结命名×全 SoC/四处源码扫描/环境变量实测） |
+| D-20 | P15 | 打包产物假定含 `loaders/`，但 publish 路径从无断言 | **fixed-in-3.1.0** | 事实核对：`loaders/` 实际由 `Kirin-Tool.csproj` 的 `Content Include="loaders/**/*" CopyToPublishDirectory` 带进 publish 树（本机实跑 `packaging/publish.sh /tmp/kt-publish-test` rc=0，输出 `loaders ok: 18 chips, 56 .ktl files`）——**没有把它改成第二份拷贝**，而是补上断言：新增 `packaging/check-loaders.sh PUBLISH_DIR [SOURCE_DIR]`（源缺 → exit 2；发布树缺目录/缺 `<stage>.ktl` → exit 1，并写明后果「运行期会报 Loader directory for <cpu> not found，这是打包 bug 不是权限问题」与修法）；`packaging/publish.sh` 在 publish 后立即调用它、`packaging/build-deb.sh` 在 `cp -a` 负载**之前**调用它、`packaging/PKGBUILD` 的 `check()` 加 `test -d publish-out/loaders`、`packaging/AppRun` 注释指向产出者。断言：`tests/LoaderPackaging`（48 checks：假树四类失败 + 真资产树 18 chip 全覆盖 + `bash -n` + 四个入口源码扫描含调用顺序） |
 | D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | **fixed-in-3.1.0** | `Cli/Mcp/McpProtocol.cs:36-95`（版本常量唯一出处 + `Negotiate`：echoed/fallback/defaulted）、`Cli/Mcp/McpServer.cs:112-160`（`Initialize(parameters, log)` 协商 + `protocolNegotiation` 字段 + stderr 失配告警）；`tests/McpProtocol` 34 条（含「版本字面量只允许一处」源码扫描） |
-| D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
+| D-22 | P09 / P08 | udev 文案与随包规则两套写法；检查只静态读文本，`TAG+="uaccess"` 在无桌面会话下无效 | **fixed-in-3.1.0** | 文案统一成**跟包走**的单一文本：`packaging/51-kirin-tool-fastboot.rules`（两条规则都 `MODE="0660" + GROUP="uucp" + TAG+="uaccess"`，`GROUP="uucp"` 在 Debian/Ubuntu 与 Arch 都存在），由 `Kirin-Tool.csproj` 以 `EmbeddedResource` 嵌进程序集，`UdevRuleNotice.DesktopRules` 直接读它（不再有第二份 C# 副本）；`packaging/build-deb.sh` 删掉 `sed s/GROUP="adbusers"/plugdev/` 与 plugdev 提示，`packaging/kirin-tool-linux.install`/`build-deb.sh postinst`/README×2/`docs/fork-release.md`/release workflow 文案同步。检查改成**两段结论**：`UdevRuleCoverage{RulesPresent, SessionAccess, Complete, Verdict, Hints, WorldAccessible}` + `UdevSessionContext{HasLogindSession, IsRemote, UserGroups, RuleGroups}`（`ClassifySession`/`ProbeSession`/`ParseGroupNames` 纯函数，读 `XDG_SESSION_*`、`SSH_*`、`/proc/self/status`+`/etc/group`，全部可注入）；规则在但会话不可用 ⇒ `Verdict=rules-present-session-unsupported` + 可操作提示（`sudo usermod -aG uucp $USER` 后重登/重连），GUI 横幅与 `udev` 命令（文本+JSON，新增 `session`/`hints`/`verdict`）都不再谎报齐全。断言：`tests/UdevNotice` 51 checks（含嵌入文本与磁盘字节相等、无 adbusers/plugdev、headless/ssh/组内/桌面/world 五种会话、假 `/proc`+`/etc/group` 解析、失败探测不冒充齐全、GUI 横幅文案） |
 | D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | **fixed-in-3.1.0**（a/b/c；「路径过长只 warn」仍是 warn，未改） | (a) `Services/Verdict/PreOpBackupChoice.cs` + `MainWindow.axaml.cs`（`HookPreOpBackupOption`/`RunPreOpBackupAsync` 前置判定）+ `MainWindow.axaml` 勾选框 + `Services/UserSettings.cs`（`pre_op_backup`，默认 true）；(b) `Services/Verdict/OperationConclusionRecord.cs` + `MainWindow.axaml.cs` `CompleteGuiOperation`（XML/Full OTA/USB Update/rescue 四处收尾）；(c) `Services/Verdict/RedlineDeltaVerdict.cs`（`FromAnswer`/`Describe`，`Timeout=10min`）+ `ConfirmRedlineDeltaOnBackground`。`tests/GuiQol` D-23a/b/c 共 30 条断言（headless + 会话文件 + 源码扫描） |
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | **fixed-in-3.1.0** | 两条 OR 聚合被删除（不是改语义后留名——名字本身才是陷阱），换成 ALL 语义 `AllStepsSucceeded`（`&&` 链）与 `HasFailure`（补集），部分进度仍由既有的 `SuccessfulStepsCount`/`AllStepsFailed` 表达。位置 `Models/FrpBypassResult.cs:36-51`、`Models/EnableDowngradeResult.cs:36-51`；现有调用点（`Cli/Commands/DeviceWriteCommands.cs:372,801`、`Services/WriteOperations/DeviceWriteOps.cs`、`MainWindow.axaml.cs:2065`）本就只读 `SuccessfulStepsCount`，行为不变。测试 `tests/WriteGates` §15（14 条）：两步 OK 一步失败 ⇒ `AllStepsSucceeded=false, HasFailure=true`；3/4 OK 的 version-field 擦除同理；反射断言 `OverallSuccess` 属性不存在（不能悄悄回归）；源码扫描断言两份模型里没有 `=> Step1Success ||` 之类的 OR 聚合。**误判后果（已消除）**：下一个调用者会拿这个「听起来像结论」的名字去报「FRP 已绕过 / 降级已开启」，而实际只有 1/3、1/4 命令回 OKAY |
 | D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | **fixed-in-3.1.0** | 新增可区分结果类型 `Services/Verdict/ReadOutcome.cs`（`ReadOutcomeKind{Ok,Unsupported,Timeout,Failed}` + 带 reason 的 `ReadOutcome<T>` + 纯分类器 `ReadOutcomes`）；`Services/Verdict/ConnectionProbe.cs`（`fastboot devices` 纯分类 + `probe-failed/probe-timeout/probe-unsupported` 状态 token）。五个调用点：`Services/FastbootClient.cs:112-144`（`ProbeConnectionAsync`，`IsDeviceConnected` 只是它的 Ok&&true 投影）；`Cli/CommandSupport.cs:29-121`（`FastbootSession.Connection` 携带探针结论、`DeviceVars.TryReadOutcomeAsync` 区分 unsupported/超时/失败，`TryReadAsync` 保留旧签名但把非 Ok 写进诊断日志）；`Cli/Commands/ReadCommands.cs:60-83`（info/doctor 的 `probe-*` 状态 + **exit 1**，不再并进 exit 2「无设备」；`unreadable` 字段逐变量给 kind+reason）；`Utils/ProcessRunner.cs:420-475`（三层空 catch → `DiagnosticLogWriter.TryWrite` + `LastDiagnosticWrite`，全失败写一行 stderr）；`Services/UserSettings.cs:88-94,350-410`（`LastLoadOutcome`/`LastSaveOutcome`，仍改名 `.bad` 但记录异常类型/目标/回落）；`Utils/LinuxSerialPortFinder.cs:186-223`（`TryReadAttribute`：absent=Unsupported、读取抛错=Failed，不再都是 null）。测试：`tests/CommandOutcomes`（58 条，纯分类器 + 临时目录/临时 sysfs 文件，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/`devices-unsupported`，断言 info/doctor exit 1/5 与 `device.probe`/`probeReason`，14 条）。**误判后果（已消除）**：以前 fastboot 坏掉/超时会被报成「没插设备」（exit 2）或干脆静默，读者照 cable/重插排查；日志写失败、settings 被改名、sysfs 读失败都没有任何痕迹 |
-| D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |
+| D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单曾有 4 份拷贝 | **fixed-in-3.1.0** | 唯一来源 `Services/SocWriteRequirements.cs`（`RequiresCableReplug` / `RequiresWpOff(soc, useFastFlashLoader)` / `ReplugAtBothSides` + 只读集合 `CableReplugSocs`/`WriteProtectionSocs`）。三个消费点全部改调：`Services/FirmwareUnlocker.cs:286,307`（null→XLOADER 拔插判据与提示文案）、`MainWindow.axaml.cs:2702`（oeminfo 写保护）、`Cli/Commands/VcomUnlockCommand.cs`（原 `ReplugAfterNullCpus` 已删）。三条 blobs/协议/时序未动（`tests/StableParity` 只刷新 FirmwareUnlocker 与 MainWindow 两个 hash 并在 reference 写明理由）。断言：`tests/SocWriteRequirements`（118 checks：字面量快照 + SoC×3 判据逐条 + 未知/大小写 SoC 否定 + **三个消费点源码扫描防回退**） |
 | D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | **fixed-in-3.1.0** | 单一实现：`Utils/UpdateAppFormat.cs`（`IsHeaderMagic` + `PartitionAliases` + `PartitionName`/`LoaderPartitionName`）；`Services/OemInfoEditor.DetectVersion`（`Services/OemInfoEditor.cs`）。调用点：`Utils/UpdateApp.cs`（标记 + 名字）、`Services/USBUpdate/USBUpdateApp.cs`（标记 ×2）、`Cli/Commands/OtaFlashRunner.cs`（名字，私有表已删）、`Cli/Commands/WriteCommands.cs`（探测）。`tests/KnowledgeDedup` 44 条（含源码扫描「只有一份实现」+「调用点真的调用」） |
 
 ### 2.3 已声明 / 有意不修（wontfix）
@@ -344,11 +366,11 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | P12 | CLI 候选链含 5 级相对回溯 + `/usr/bin` | 同上；且 `doctor` 不区分血统 | fixed-in-2.4.26（D-07：回落在每个结果里可见，doctor 报血统） |
 | P13 | `doctor.ok = 找到 && 能跑` | `ok:true` 被当成「环境健康」 | fixed-in-2.4.26（D-07/D-08：非华为血统 ok=false 且 exit 6） |
 | P14 | 随包 fastboot 需联网构建；仓库里只有 `fastboot/payload` | 未跑构建时必然落到 P11 | open |
-| P15 | 打包产物假定含 `loaders/`，`publish.sh` 不产出 | VCOM 解锁报「loader 目录不存在」→ 被读成本机权限问题 | open（D-20） |
+| P15 | 打包产物假定含 `loaders/`，publish 路径无断言 | VCOM 解锁报「loader 目录不存在」→ 被读成本机权限问题 | fixed-in-3.1.0（D-20：`packaging/check-loaders.sh` 在 publish/deb 期失败） |
 | P01 | Windows 用 WMI `Caption LIKE '%(COM%'` + `Substring` 解析 | 设备名不含 `(COMx)` 时静默 null → 报「没有 VCOM 设备」而不是「端口名解析失败」 | open |
-| P02 | Linux 按驱动名 `option` 决定关 RTS/DTR | 驱动换成 `cdc_acm`/`usbserial` 时表现为「连上但一发就断」 | open（D-18） |
+| P02 | Linux 按驱动名 `option` 决定关 RTS/DTR | 驱动换成 `cdc_acm`/`usbserial` 时表现为「连上但一发就断」 | fixed-in-3.1.0（D-18：`ModemLinePolicy` 能力探测 + 事件/doctor 可观测） |
 | P05 / P06 | 只认 `/dev/ttyUSB*`、`ttyACM*`、`ttyGS*`，接口匹配只认 `ff/13/23` | 描述符一变 → 「未找到端口」，被读成设备没进模式 | open |
-| P08 | 静态读 udev 文本判「权限已覆盖」 | `TAG+="uaccess"` 在 SSH/无桌面会话无效 → 报「规则齐全」但 `open` 失败 | open（D-22） |
+| P08 | 静态读 udev 文本判「权限已覆盖」 | `TAG+="uaccess"` 在 SSH/无桌面会话无效 → 报「规则齐全」但 `open` 失败 | fixed-in-3.1.0（D-22：规则文本 + 会话上下文两段结论 + 提示） |
 | P21 | MCP 协议版本固定 | 新客户端协商行为未定义 → 工具「没出现」被读成服务没起 | open（D-21） |
 | P27 | 依赖英文前缀 `(bootloader)`/`OKAY`/`FAILED` | loader 改语言/加前缀 → 结论退化 Unknown，看起来像「设备异常」 | fixed-in-2.4.25（D-10：行首 token + 失败优先，Unknown 有明确文案） |
 | P04 | Linux 与 Windows 是同一协议的两套传输实现 | Linux 侧行为差异无法用 Windows 结果背书 | open（无对照测试） |
@@ -381,7 +403,7 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 
 ## 统计（v2.4.14 基线）
 
-- 已关闭（v3.1.0 后）：D-01…D-17 全部 fixed；**D-24、D-25 → fixed-in-3.1.0**；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27 关闭。
-- 仍 open：D-18…D-23、D-26、D-27 共 8 条（供货/打包/协议版本/udev 文案/GUI 隐式步骤/名单四份/知识重复），按危险度排序后 TOP3 = D-23（GUI 隐式步骤）、D-20（打包缺 loaders）、D-19（loader 目录约定）。
+- 已关闭（v3.1.0 后）：D-01…D-27 **全部 fixed**（v3.0.0 复核关闭 D-01…D-17，v3.1.0 三条 lane 关闭 D-18…D-27）；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27/P15/P02/P08 关闭。
+- 仍 open：**D 编号范围内 0 条**；剩下的都是平台假设组 P14（随包 fastboot 需联网构建）/ P01（Windows 端口名解析）/ P05·P06（只认特定 tty 与接口号）/ P04（Linux 与 Windows 两套传输实现无对照测试），以及三条已知取舍（M5 包外绝对路径 fail-closed、R3 Windows PnP 只有假数据断言、OemInfoService 0600 与 unlockcode 上位拷贝仅代码审查）。
 - wontfix：4 组（B 类 2 条 + 协议常量 13 条 + 纯 UI handler 17 个）。
 - unknown：审计报告中未逐行复核的剩余条目（见附录 E），数量取决于复核粒度，不在此虚报。

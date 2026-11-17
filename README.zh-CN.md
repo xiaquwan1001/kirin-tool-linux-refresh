@@ -189,7 +189,9 @@ agent 的请求会以审批弹窗的形式出现在 GUI 里，弹窗写明发起
 USB 没权限就加组后重连：
 
 ```bash
-sudo usermod -aG plugdev,uucp "$USER"   # Debian/Ubuntu（Arch/CachyOS 用 adbusers）
+# 随包规则所有发行版都用 GROUP="uucp"（不再有 adbusers/plugdev 两套写法）；
+# 本地桌面会话另可由 TAG+="uaccess" 授权，组是给 ssh/容器/CI 会话用的。
+sudo usermod -aG uucp "$USER"
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 

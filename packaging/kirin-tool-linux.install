@@ -4,8 +4,9 @@ post_install() {
 Kirin Tool for Linux setup notes:
   - udev rules installed to /usr/lib/udev/rules.d/51-kirin-tool-fastboot.rules
   - reload them with:  sudo udevadm control --reload-rules && sudo udevadm trigger
-  - make sure your user is in the 'adbusers' group (fastboot) and the 'uucp'
-    group (VCOM serial), e.g.:  sudo usermod -aG adbusers,uucp $USER
+  - the rule grants GROUP="uucp" (fastboot + VCOM serial). A local desktop
+    session gets access through TAG+="uaccess"; a non-desktop session
+    (ssh/container/CI) needs the group, e.g.:  sudo usermod -aG uucp $USER
     (log out and back in afterwards)
   - a Huawei-capable fastboot is bundled at /usr/lib/kirin-tool-linux/fastboot/fastboot
     and is used automatically; system android-tools fastboot remains as fallback

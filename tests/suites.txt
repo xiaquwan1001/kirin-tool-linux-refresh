@@ -30,5 +30,9 @@ CommandOutcomes
 VersionMetadata
 BatteryGate
 PwnJumpTable
+SocWriteRequirements
+ModemLinePolicy
+LoaderDirectory
+LoaderPackaging
 DloadSentinel
 KnowledgeDedup

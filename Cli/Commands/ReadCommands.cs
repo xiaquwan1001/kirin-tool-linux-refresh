@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
 using Kirin_Tool.Services.Verdict;
+using Kirin_Tool.Utils;
 
 namespace Kirin_Tool.Cli.Commands;
 
@@ -203,11 +204,27 @@ internal sealed class DoctorCommand : ICliCommand
             : "unknown";
 
         var loaders = BundledLoaders.Inventory();
+        // D-19: the resolved loader root and its provenance (--loader-dir / KIRIN_LOADERS_DIR / default).
+        LoaderDirectoryResolution loaderResolution = BundledLoaders.Resolve();
 
         // D-08 (audit F17/F18): a connected loader that rejects every probe is not the same finding
         // as a healthy device. `status` is the three-state answer, `ok` is only true for "ok".
         bool informationallyUseful = connected &&
             (probes.Any(pair => pair.Value != null) || psidReadable || partitionCount is > 0);
+
+        // D-18 (audit P02 / H15): which modem-line path a VCOM run would take on this host, and on
+        // what evidence. Read-only: FindPort walks sysfs, it never opens the tty.
+        string? vcomPort = null;
+        string? vcomNote = null;
+        if (OperatingSystem.IsLinux())
+        {
+            try { vcomPort = LinuxSerialPortFinder.FindPort(0x12D1, 0x3609); }
+            catch (AmbiguousSerialDeviceException ex) { vcomNote = ex.Message; }
+            catch (Exception ex) { vcomNote = ex.GetType().Name + ": " + ex.Message; }
+        }
+        ModemLineDecision modemLines = ModemLinePolicy.Decide(
+            OperatingSystem.IsLinux(), explicitPort: false, forcedBulkOnly: null,
+            ModemLinePolicy.ProbeDriver(vcomPort));
 
         // D-07 (audit P11/P12/P13/H32): "found && runs" is not the same as "the client that works".
         // The lineage token is derived from the resolved path (the bundled directory is the only
@@ -232,7 +249,7 @@ internal sealed class DoctorCommand : ICliCommand
             new { name = "fastboot-runs", ok = fastbootVersion != null, detail = fastbootVersion ?? "fastboot --version failed" },
             new { name = "fastboot-parity", ok = parityOk, detail = parity + " — " + FastbootParity.Describe(parity) },
             new { name = "adb-found", ok = adbPath != null, detail = adbPath ?? "not found (optional, KIRIN_ADB / PATH)" },
-            new { name = "loaders-bundled", ok = loaders.Count > 0, detail = $"{loaders.Count} chip directories under {BundledLoaders.Directory}" },
+            new { name = "loaders-bundled", ok = loaders.Count > 0, detail = $"{loaders.Count} chip directories under {loaderResolution.Root} (source: {loaderResolution.SourceName})" },
             new { name = "fastboot-device", ok = connected, detail = probeDetail },
             new { name = "psid-readable", ok = psidReadable, detail = psidReadable ? "oem get-psid answered" : "oem get-psid unavailable/rejected" },
             new { name = "ptable-readable", ok = partitionCount is > 0, detail = partitionCount is > 0 ? $"{partitionCount} partitions" : "getvar ptable unavailable" },
@@ -261,11 +278,29 @@ internal sealed class DoctorCommand : ICliCommand
                 runtime = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier,
             },
             fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, parity, devices = fastbootDevices },
+            vcom = new
+            {
+                port = vcomPort,
+                note = vcomNote,
+                modemLines = new
+                {
+                    mode = modemLines.BulkOnly ? "bulk-only" : "rtscts",
+                    origin = modemLines.Origin,
+                    verified = modemLines.Verified,
+                    driver = modemLines.Probe.Driver,
+                    driverKnown = modemLines.Probe.Known,
+                    probeAttempted = modemLines.Probe.Attempted,
+                    reason = modemLines.Reason,
+                },
+            },
             adb = new { found = adbPath != null, path = adbPath, version = adbVersion, devices = adbDevices },
             loaders = new
             {
-                directory = BundledLoaders.Directory,
-                exists = Directory.Exists(BundledLoaders.Directory),
+                directory = loaderResolution.Root,
+                // D-19: which input won the resolution; "not found" can be traced to a source now.
+                source = loaderResolution.SourceName,
+                sourceValue = loaderResolution.RawValue,
+                exists = Directory.Exists(loaderResolution.Root),
                 chips = loaders.Select(entry => new { chip = entry.Chip, ktlFiles = entry.Files }).ToList(),
             },
             device = new
@@ -302,7 +337,10 @@ internal sealed class DoctorCommand : ICliCommand
             context.Output.WriteLine($"adb:      {adbPath ?? "not found (optional)"}  {(adbVersion != null ? "[" + adbVersion + "]" : string.Empty)}");
             context.Output.WriteLine($"fastboot devices: {(fastbootDevices.Count == 0 ? "(none)" : string.Join(" | ", fastbootDevices))}");
             context.Output.WriteLine($"adb devices:      {(adbDevices.Count == 0 ? "(none)" : string.Join(" | ", adbDevices))}");
-            context.Output.WriteLine($"loaders: {loaders.Count} chips, {loaders.Sum(entry => entry.Files)} .ktl files in {BundledLoaders.Directory}");
+            // D-18: the modem-line path is visible here, not only in the VCOM session log.
+            context.Output.WriteLine($"vcom port:        {vcomPort ?? "not present"}{(vcomNote != null ? "  (" + vcomNote + ")" : string.Empty)}");
+            context.Output.WriteLine($"vcom modem lines: {modemLines.Describe()}");
+            context.Output.WriteLine($"loaders: {loaders.Count} chips, {loaders.Sum(entry => entry.Files)} .ktl files in {loaderResolution.Root}  (source: {loaderResolution.SourceName})");
             context.Output.WriteLine($"device: {(connected ? "connected" : "not connected")} chip={chip}");
             foreach (var pair in probes.Where(pair => pair.Value != null))
                 context.Output.WriteLine($"  {pair.Key}: {pair.Value}");

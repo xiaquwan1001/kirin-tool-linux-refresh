@@ -1,10 +1,17 @@
-# Fastboot uses the USB device node. uaccess grants the active local desktop
-# user access; adbusers supports sessions without logind uaccess.
-# NOTE: adbusers only exists on Arch/CachyOS. packaging/build-deb.sh rewrites this
-# line to GROUP="plugdev" for the .deb, because Debian/Ubuntu ship no adbusers group.
-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="12d1", MODE="0660", GROUP="adbusers", TAG+="uaccess"
+# Kirin Tool for Linux - Huawei (12d1) USB permission rules.
+#
+# ONE text for every package: the AppImage/deb/Arch packages install this exact file and the app
+# embeds it (Services/UdevRuleNotice.cs), so the instructions the GUI/CLI print and the rule that
+# is installed cannot drift apart (debt D-22).
+#
+# GROUP="uucp" exists on Debian/Ubuntu and on Arch; it covers sessions without a logind seat
+# (ssh, containers, CI) where TAG+="uaccess" does nothing. On an active local desktop session
+# uaccess additionally grants the logged-in user access, so group membership is not required
+# there. MODE="0660" keeps the nodes non-world-writable.
 
-# VCOM and USB Update use tty nodes. DBAdapter product IDs vary by firmware, so
-# match Huawei's vendor ID on USB-backed tty devices and grant the same session
-# access. uucp is the fallback group for non-desktop sessions.
+# Fastboot uses the USB device node.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="12d1", MODE="0660", GROUP="uucp", TAG+="uaccess"
+
+# VCOM and USB Update use tty nodes. DBAdapter product IDs vary by firmware, so match Huawei's
+# vendor ID on USB-backed tty devices.
 ACTION=="add", SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="12d1", MODE="0660", GROUP="uucp", TAG+="uaccess"

@@ -71,9 +71,8 @@ public static class LoaderPrecheck
         {
             if (stageSelected != null && !stageSelected(loaderInfo.Name)) continue;
 
-            string fileName = useFastFlashLoader && loaderInfo.Name == "FASTBOOT"
-                ? "fastbootf.ktl"
-                : loaderInfo.Name.ToLowerInvariant() + ".ktl";
+            // D-19: the frozen naming rule (<stage>.ktl / fastbootf.ktl) has one owner.
+            string fileName = LoaderDirectory.StageFileName(loaderInfo.Name, useFastFlashLoader);
             string filePath = Path.Combine(loaderDirectory, fileName);
 
             if (!File.Exists(filePath))

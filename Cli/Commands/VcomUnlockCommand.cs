@@ -42,7 +42,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
         new CliParam("ack-timeout", "string", "seconds to wait for each ACK (default 10, the GUI value)"),
         new CliParam("require-ack", "boolean", "fail (exit 3, verified=false) when any frame is missing its 0xAA ACK; the lenient recording behaviour is kept, so the upload is not aborted mid-transfer"),
         new CliParam("replug", "string", "cable prompt policy: skip (non-interactive default) | prompt | wait:<seconds>"),
-        new CliParam("loader-dir", "string", "directory holding the per-chip loader subdirectories (default: <program dir>/loaders)"),
+        new CliParam("loader-dir", "string", "directory holding the per-chip loader subdirectories (default: $KIRIN_LOADERS_DIR, else <program dir>/loaders; this flag wins)"),
         new CliParam("stage-only", "string", "stage subset: all | null | xloader | rest (rest never re-sends START)", Enum: new[] { "all", "null", "xloader", "rest" }, Default: "all"),
         new CliParam("port", "string", "explicit VCOM tty/COM path (skips the 12d1:3609 enumeration; bulk-only framing, no modem lines)"),
         new CliParam("use-fastflash-loader", "boolean", "upload fastbootf.ktl instead of fastboot.ktl (the GUI switch)"),
@@ -51,9 +51,6 @@ internal sealed class VcomUnlockCommand : ICliCommand
         new CliParam("yes", "boolean", "acknowledge the plan and really upload the loaders"),
         new CliParam("json", "boolean", "structured output"),
     };
-
-    /// <summary>Chips whose null→XLOADER handoff needs a physical cable replug (same list as the GUI).</summary>
-    private static readonly string[] ReplugAfterNullCpus = { "hisi980", "hisi810", "hisi820", "hisi985", "hisi990" };
 
     public async Task<int> ExecuteAsync(ParsedArgs args, CliContext context, CancellationToken cancellationToken)
     {
@@ -114,21 +111,32 @@ internal sealed class VcomUnlockCommand : ICliCommand
         bool dryRun = args.HasFlag("dry-run");
         bool frameLog = !args.HasFlag("no-frame-log");
 
-        string loaderBase = args.Value("loader-dir") is { Length: > 0 } loaderDirArg
-            ? Path.GetFullPath(loaderDirArg, context.WorkingDirectory)
-            : BundledLoaders.Directory;
-        string loaderDirectory = Path.Combine(loaderBase, cpu);
+        // D-19: priority --loader-dir > KIRIN_LOADERS_DIR > <program dir>/loaders, and the winner
+        // is carried along so the plan/log can say where the directory came from.
+        LoaderDirectoryResolution loaderResolution = BundledLoaders.Resolve(args.Value("loader-dir"), context.WorkingDirectory);
+        string loaderBase = loaderResolution.Root;
+        string loaderDirectory = loaderResolution.ChipDirectory(cpu);
 
         var planned = BundledLoaders.Plan(cpu, useFastFlash, loaderBase)
             .Where(stage => StageSelected(stage.Stage, stages))
             .ToList();
         int presentCount = planned.Count(stage => stage.Exists);
 
+        // D-18 (audit P02 / H15): say which modem-line path the flasher will take and on what
+        // evidence, before a single frame is sent. The flasher re-decides at Connect() time (the
+        // port may not exist yet), but the plan must not be silent about it.
+        string? portArg = args.Value("port") is { Length: > 0 } explicitPort ? explicitPort : null;
+        ModemLineDecision plannedModemLines = ModemLinePolicy.Decide(
+            OperatingSystem.IsLinux(), portArg != null, null,
+            ModemLinePolicy.ProbeDriver(portArg ?? LinuxSerialPortFinder.FindPort(0x12D1, 0x3609)));
+
         bool confirmed = (context.Yes || args.HasFlag("yes")) && !dryRun;
         var planPayload = new
         {
             cpu,
             loaderDirectory,
+            loaderDirectorySource = loaderResolution.SourceName,
+            loaderDirectorySourceValue = loaderResolution.RawValue,
             implementation = "Services/FirmwareUnlocker.UnlockFastboot + Services/VcomFlasher (invoked: this command performs the real upload)",
             requiresVcomMode = "HUAWEI USB COM 1.0 (12d1:3609)",
             ackMode = AckModeName(ackMode),
@@ -137,6 +145,15 @@ internal sealed class VcomUnlockCommand : ICliCommand
             replug = ReplugName(replug, replugWaitSeconds),
             stageSelection = StageName(stages),
             useFastFlashLoader = useFastFlash,
+            modemLines = new
+            {
+                mode = plannedModemLines.BulkOnly ? "bulk-only" : "rtscts",
+                origin = plannedModemLines.Origin,
+                verified = plannedModemLines.Verified,
+                driver = plannedModemLines.Probe.Driver,
+                driverKnown = plannedModemLines.Probe.Known,
+                reason = plannedModemLines.Reason,
+            },
             stageCount = planned.Count,
             presentStages = presentCount,
             missingStages = planned.Count - presentCount,
@@ -158,6 +175,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
             logger.Event("plan",
                 ("cpu", cpu),
                 ("loaderDirectory", loaderDirectory),
+                ("loaderDirectorySource", loaderResolution.SourceName),
                 ("stages", StageName(stages)),
                 ("ackMode", AckModeName(ackMode)),
                 ("replug", ReplugName(replug, replugWaitSeconds)),
@@ -185,7 +203,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
                 });
             else
             {
-                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages);
+                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages, plannedModemLines, loaderResolution);
                 context.Output.WriteLine();
                 context.Output.WriteLine($"gate: plan-only (exit {ExitCodes.Gated})");
                 context.Output.WriteLine("re-run with --yes (CLI) or confirm:true (MCP) to really upload the loaders.");
@@ -214,7 +232,9 @@ internal sealed class VcomUnlockCommand : ICliCommand
         // The null→XLOADER handoff on these chips needs the device to be unplugged from the
         // computer side; a non-interactive run cannot do that on its own.
         bool continuesPastNull = stages is UnlockStageSelection.All or UnlockStageSelection.Xloader;
-        bool needsReplug = continuesPastNull && ReplugAfterNullCpus.Contains(cpu);
+        // D-26: the replug list has one owner (Services/SocWriteRequirements.cs); the CLI no
+        // longer keeps its own copy of the GUI's list.
+        bool needsReplug = continuesPastNull && SocWriteRequirements.RequiresCableReplug(cpu);
         if (needsReplug && replug == ReplugPolicy.Skip)
         {
             context.Diag("refused: this chip's null→XLOADER handoff requires a physical cable replug; " +
@@ -234,6 +254,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
         logger.Event("run",
             ("cpu", cpu),
             ("loaderDirectory", loaderDirectory),
+            ("loaderDirectorySource", loaderResolution.SourceName),
             ("stages", StageName(stages)),
             ("ackMode", AckModeName(ackMode)),
             ("replug", ReplugName(replug, replugWaitSeconds)),
@@ -242,7 +263,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
 
         var flasherOptions = new VcomFlasherOptions
         {
-            PortName = args.Value("port") is { Length: > 0 } portArg ? portArg : null,
+            PortName = portArg,
             AckMode = ackMode,
             AckTimeout = ackTimeout,
             Logger = logger,
@@ -471,11 +492,15 @@ internal sealed class VcomUnlockCommand : ICliCommand
 
     private static void WritePlanText(CliContext context, string cpu, string loaderDirectory,
         IReadOnlyList<(string Stage, string File, int Address, bool PwnFlag, bool Exists)> planned,
-        VcomAckMode ackMode, ReplugPolicy replug, int replugWaitSeconds, UnlockStageSelection stages)
+        VcomAckMode ackMode, ReplugPolicy replug, int replugWaitSeconds, UnlockStageSelection stages,
+        ModemLineDecision modemLines, LoaderDirectoryResolution loaderResolution)
     {
         context.Output.WriteLine($"vcom unlock plan for {cpu}");
-        context.Output.WriteLine($"loader directory: {loaderDirectory}");
+        // D-19: the directory and where it came from (--loader-dir / KIRIN_LOADERS_DIR / default).
+        context.Output.WriteLine($"loader directory: {loaderDirectory}  (source: {loaderResolution.SourceName})");
         context.Output.WriteLine($"ack mode: {AckModeName(ackMode)}   replug: {ReplugName(replug, replugWaitSeconds)}   stage-only: {StageName(stages)}");
+        // D-18: the modem-line path is part of the plan, with its evidence.
+        context.Output.WriteLine($"modem lines: {modemLines.Describe()}");
         context.Output.WriteLine("would upload, in order (device must already be in VCOM mode unless --stage-only rest):");
         context.Output.WriteLine(TextFormat.Table(planned.Select(stage => new[]
         {

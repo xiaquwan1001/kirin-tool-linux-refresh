@@ -199,7 +199,9 @@ repository must not silently change the deb package name (that would break upgra
 If USB access is denied, add yourself to the right groups and reconnect:
 
 ```bash
-sudo usermod -aG plugdev,uucp "$USER"   # Debian/Ubuntu (adbusers on Arch/CachyOS)
+# The bundled rule grants GROUP="uucp" on every distro (no adbusers/plugdev split);
+# a local desktop session also gets access via TAG+="uaccess", the group covers ssh/CI.
+sudo usermod -aG uucp "$USER"
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 

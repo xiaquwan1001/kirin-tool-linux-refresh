@@ -22,6 +22,12 @@ for probe in UsbUpdateProbe VcomOpenProbe; do
   for suffix in '' .dll .deps.json .runtimeconfig.json; do cp "$TEMP/$probe$suffix" "$OUT/"; done
   rm -rf "$TEMP"
 done
+# ---- VCOM loader set (D-20) ----
+# The csproj Content glob (loaders/**/*, CopyToPublishDirectory) is what puts loaders/ into the
+# tree; this call proves it happened. Without the check a publish tree can silently ship without
+# loaders/, and only a VCOM unlock on the packaged build notices - as "Loader directory for <cpu>
+# not found", which reads like a host permission problem instead of a packaging bug.
+"$ROOT/packaging/check-loaders.sh" "$OUT"
 mkdir -p "$OUT/licenses" "$OUT/docs"
 cp LICENSE "$OUT/licenses/LICENSE"
 cp Assets/Fonts/LICENSE.txt "$OUT/licenses/LICENSE.fluent-system-icons"

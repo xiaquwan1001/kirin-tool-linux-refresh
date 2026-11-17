@@ -178,7 +178,10 @@ namespace Kirin_Tool.Services
                     return Fail(UnlockFailureKind.LocalFile, $"Unsupported CPU '{cpu}'.");
                 }
 
-                var loaderDir = options?.LoaderDirectory ?? Path.Combine(AppContext.BaseDirectory, "loaders", cpu);
+                // D-19: the default root honours KIRIN_LOADERS_DIR, and the layout
+                // (<root>/<cpu>/<stage>.ktl) is unchanged (frozen face).
+                var loaderDir = options?.LoaderDirectory
+                    ?? LoaderDirectory.ResolveFromEnvironment(null, AppContext.BaseDirectory).ChipDirectory(cpu);
                 if (!Directory.Exists(loaderDir))
                 {
                     return Fail(UnlockFailureKind.LocalFile, $"Loader directory for {cpu} not found at '{loaderDir}'");
@@ -232,11 +235,8 @@ namespace Kirin_Tool.Services
                         var currentItem = progressItems.FirstOrDefault(p => p.FileName == loaderInfo.Name);
                         if (currentItem == null) continue;
 
-                        string fileName = $"{loaderInfo.Name.ToLower()}.ktl";
-                        if (useFastFlashLoader && loaderInfo.Name == "FASTBOOT")
-                        {
-                            fileName = "fastbootf.ktl";
-                        }
+                        // The naming rule is frozen and now has one owner (D-19).
+                        string fileName = LoaderDirectory.StageFileName(loaderInfo.Name, useFastFlashLoader);
 
                         var filePath = Path.Combine(loaderDir, fileName);
                         var payload = precheck.Stages.FirstOrDefault(stage =>
@@ -283,7 +283,8 @@ namespace Kirin_Tool.Services
                             decryptedData.LongLength, flasher.FramesSent - framesBefore, flasher.AckOk - acksBefore, "uploaded",
                             stageWatch.ElapsedMilliseconds, null));
 
-                        if (continuesPastNull && includesNull && (cpu == "hisi980" || cpu == "hisi810" || cpu == "hisi820" || cpu == "hisi985" || cpu == "hisi990") && loaderInfo.Name == "null")
+                        // D-26: the SoC list lives in Services/SocWriteRequirements.cs, not inline.
+                        if (continuesPastNull && includesNull && SocWriteRequirements.RequiresCableReplug(cpu) && loaderInfo.Name == "null")
                         {
                             overallProgress.Report("Waiting for cable manipulation...");
                             await Task.Delay(options?.NullStageSettlingDelay ?? TimeSpan.FromSeconds(1));
@@ -303,13 +304,13 @@ namespace Kirin_Tool.Services
                         }
                     }
 
-                    if (stages == UnlockStageSelection.All && (cpu == "hisi980" || cpu == "hisi810" || cpu == "hisi820" || cpu == "hisi985" || cpu == "hisi990") && interactionHandler != null)
+                    if (stages == UnlockStageSelection.All && SocWriteRequirements.RequiresCableReplug(cpu) && interactionHandler != null)
                     {
-                        string replugStr = useFastFlashLoader ? "If you are using a modified cable (Harmony TP), please unplug it from BOTH SIDES, and connect the device with a standard cable." : "If you are using a modified cable (Harmony TP), please unplug it from the COMPUTER SIDE, wait a few seconds, then plug it back in.";
-                        if (cpu == "hisi810" || cpu == "hisi820" || cpu == "hisi985" || cpu == "hisi990")
-                        {
-                            replugStr = "If you are using a modified cable (Harmony TP), please unplug it from BOTH SIDES, and connect the device with a standard cable.";
-                        }
+                        // D-26: which prompt to show is a rule too (hisi980 follows the loader
+                        // flavour); it comes from SocWriteRequirements, not from a second list.
+                        string replugStr = SocWriteRequirements.ReplugAtBothSides(cpu, useFastFlashLoader)
+                            ? "If you are using a modified cable (Harmony TP), please unplug it from BOTH SIDES, and connect the device with a standard cable."
+                            : "If you are using a modified cable (Harmony TP), please unplug it from the COMPUTER SIDE, wait a few seconds, then plug it back in.";
 
                         // await interactionHandler("If you are using a modified cable (Harmony TP):\n1. Unplug it from both sides\n2. Connect the device to the computer with a normal cable\n3. Wait a few seconds\n4. Reconnect using the modified cable");
                         await interactionHandler(replugStr);

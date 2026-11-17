@@ -2776,11 +2776,9 @@ namespace Kirin_Tool
                     return;
                 }
 
-                bool shouldDisableWp = (selectedCpu == "hisi980" && UseFastFlashLoaderSwitch.IsChecked == true) ||
-                                       selectedCpu == "hisi810" ||
-                                       selectedCpu == "hisi820" ||
-                                       selectedCpu == "hisi985" ||
-                                       selectedCpu == "hisi990";
+                // D-26: the write-protection SoC list lives in Services/SocWriteRequirements.cs
+                // (hisi980 is conditional on the fastflash loader, the rest are unconditional).
+                bool shouldDisableWp = SocWriteRequirements.RequiresWpOff(selectedCpu, UseFastFlashLoaderSwitch.IsChecked == true);
 
                 // This branch sends three irreversible loader commands straight at the oeminfo
                 // fields. It used to skip both the approval gate and the write-identity gate

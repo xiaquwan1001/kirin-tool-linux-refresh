@@ -201,6 +201,7 @@ jobs:
 
             Install (deb): `sudo apt install ./kirin-tool-linux_*_amd64.deb`, then run `kirin-tool`
             (GUI) or `kirin-tool-cli --help`. A udev rule granting access to 12d1 USB devices is
-            included; add yourself to the `adbusers` group (or edit the rule).
+            included; it grants GROUP="uucp" on every distro (a local desktop session also gets
+            TAG+="uaccess"), so add yourself to `uucp` for ssh/container sessions.
 
             Licenses: BSL-1.1 for the app, plus the notices under /usr/share/licenses/kirin-tool-linux.
