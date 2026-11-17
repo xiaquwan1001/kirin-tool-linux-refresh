@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
+using Kirin_Tool.Services.Verdict;
 using Kirin_Tool.Utils;
 
 namespace Kirin_Tool.Cli;
@@ -20,16 +21,24 @@ internal static class ToolInfo
 
 internal sealed class FastbootSession
 {
-    private FastbootSession(string executablePath, FastbootClient client, bool connected)
+    private FastbootSession(string executablePath, FastbootClient client, ReadOutcome<bool> connection)
     {
         ExecutablePath = executablePath;
         Client = client;
-        Connected = connected;
+        Connection = connection;
     }
 
     public string ExecutablePath { get; }
     public FastbootClient Client { get; }
-    public bool Connected { get; }
+
+    /// <summary>
+    /// D-25 (audit S25): the probe verdict, not just a bool. <c>Ok(true)</c> = a device is in fastboot
+    /// mode, <c>Ok(false)</c> = the probe ran and found none, anything else = the probe itself could
+    /// not answer (unsupported / timeout / failed) — which is an environment finding, not "no device".
+    /// </summary>
+    public ReadOutcome<bool> Connection { get; }
+
+    public bool Connected => Connection.Succeeded && Connection.Value;
 
     /// <summary>Null means no fastboot binary was found at all.</summary>
     public static async Task<FastbootSession?> TryOpenAsync()
@@ -38,58 +47,92 @@ internal sealed class FastbootSession
         if (path == null) return null;
 
         var client = new FastbootClient(path);
-        bool connected;
-        try
-        {
-            connected = await client.IsDeviceConnected();
-        }
-        catch (Exception)
-        {
-            connected = false;
-        }
-        return new FastbootSession(path, client, connected);
+        // No local catch any more: ProbeConnectionAsync already turns every exception into an
+        // outcome, so "the probe threw" can no longer be flattened into Connected=false here.
+        ReadOutcome<bool> connection = await client.ProbeConnectionAsync();
+        return new FastbootSession(path, client, connection);
     }
 }
 
 internal static class DeviceVars
 {
-    /// <summary>Read-only getvar probe; never throws, returns null when unsupported.</summary>
-    public static async Task<string?> TryReadAsync(FastbootClient client, string variable)
+    /// <summary>
+    /// D-25 (audit S28): the read-only <c>getvar</c> probe, keeping "the variable is unsupported",
+    /// "the probe timed out" and "the probe failed" apart. Never throws. Callers that only need a
+    /// value use <see cref="TryReadAsync"/> (which logs the reason instead of dropping it).
+    /// </summary>
+    public static async Task<ReadOutcome<string>> TryReadOutcomeAsync(FastbootClient client, string variable)
     {
+        ProcessResult result;
         try
         {
-            ProcessResult result = await client.QueryVariableAsync(variable);
-            string output = result.Output ?? string.Empty;
-            if (!result.IsSuccess) return null;
-            if (output.Contains("FAILED", StringComparison.OrdinalIgnoreCase)) return null;
-            if (output.Contains("invalid command", StringComparison.OrdinalIgnoreCase)) return null;
-            if (output.Contains("not allowed", StringComparison.OrdinalIgnoreCase)) return null;
+            result = await client.QueryVariableAsync(variable);
+        }
+        catch (Exception ex)
+        {
+            return ReadOutcomes.FromException<string>(ex, "getvar " + variable);
+        }
 
-            try
-            {
-                return FastbootReadResponses.Variable(result, variable);
-            }
-            catch (InvalidOperationException)
-            {
-                // Some bootloaders print the value without the "name:" prefix.
-                string? line = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(l => l.Trim())
-                    .FirstOrDefault(l => l.Length > 0 &&
-                        !l.StartsWith("(bootloader)", StringComparison.OrdinalIgnoreCase) &&
-                        !l.StartsWith("OKAY", StringComparison.OrdinalIgnoreCase) &&
-                        !l.StartsWith("INFO", StringComparison.OrdinalIgnoreCase) &&
-                        !l.StartsWith("Finished", StringComparison.OrdinalIgnoreCase));
-                return line;
-            }
-        }
-        catch (TimeoutException)
+        // D-10 already established the rule this leans on: success must come from stdout, while a
+        // failure token anywhere (and an "unknown variable"/"not support" wording in particular) wins.
+        string stdout = string.IsNullOrEmpty(result.StandardOutput) ? result.Output ?? string.Empty : result.StandardOutput;
+        switch (ReadOutcomes.ClassifyVariableReply(result.IsSuccess, stdout, result.ErrorOutput))
         {
-            return null;
+            case ReadOutcomeKind.Unsupported:
+                return ReadOutcome<string>.Unsupported(
+                    "getvar " + variable + " is not answerable on this loader (" + FirstLine(result.ErrorOutput, stdout) + ")");
+            case ReadOutcomeKind.Failed:
+                return ReadOutcome<string>.Failed(
+                    "getvar " + variable + " failed (exit " + result.ExitCode + ": " + FirstLine(result.ErrorOutput, stdout) + ")");
         }
-        catch (Exception)
+
+        string? value;
+        try
         {
-            return null;
+            value = FastbootReadResponses.Variable(result, variable);
         }
+        catch (InvalidOperationException)
+        {
+            // Some bootloaders print the value without the "name:" prefix.
+            value = stdout.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => l.Trim())
+                .FirstOrDefault(l => l.Length > 0 &&
+                    !l.StartsWith("(bootloader)", StringComparison.OrdinalIgnoreCase) &&
+                    !l.StartsWith("OKAY", StringComparison.OrdinalIgnoreCase) &&
+                    !l.StartsWith("INFO", StringComparison.OrdinalIgnoreCase) &&
+                    !l.StartsWith("Finished", StringComparison.OrdinalIgnoreCase));
+        }
+
+        return string.IsNullOrWhiteSpace(value)
+            ? ReadOutcome<string>.Failed("getvar " + variable + ": no value in the reply (" + FirstLine(stdout, result.ErrorOutput) + ")")
+            : ReadOutcome<string>.Ok(value!.Trim());
+    }
+
+    /// <summary>
+    /// Value-or-null wrapper kept for the call sites that only need the answer (backup gates, battery
+    /// gate). The verdict is not dropped: a non-Ok read is written to the diagnostic log with its
+    /// kind and reason, so "nothing came back" is no longer the only trace.
+    /// </summary>
+    public static async Task<string?> TryReadAsync(FastbootClient client, string variable)
+    {
+        ReadOutcome<string> outcome = await TryReadOutcomeAsync(client, variable);
+        if (outcome.Succeeded) return outcome.Value;
+        ProcessRunner.WriteDiagnostic("DeviceVars", outcome.Describe());
+        return null;
+    }
+
+    private static string FirstLine(params string?[] streams)
+    {
+        foreach (string? stream in streams)
+        {
+            if (string.IsNullOrWhiteSpace(stream)) continue;
+            string? line = stream!.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(text => text.Trim())
+                .FirstOrDefault(text => text.Length > 0);
+            if (line != null) return line;
+        }
+
+        return "no output";
     }
 
     public static async Task<bool> PsidReadableAsync(FastbootClient client)

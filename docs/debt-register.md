@@ -35,6 +35,30 @@
   GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
 - **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
 
+## v3.1.0 变更（2026-11-18，主机侧，无设备）
+
+本轮只做「失败 / 不支持 / 超时」与「聚合语义」这两类判据收紧：wire 命令、时序、重试与 GUI 行为都不变，
+两条都按仓库习惯抽成纯函数（注入式读取）并落可断言测试。
+
+- **D-25 → fixed-in-3.1.0**（S23 / S25 / S28 / S31 / S33）：新增 `Services/Verdict/ReadOutcome.cs`
+  （`Ok / Unsupported / Timeout / Failed` + 必带 reason）与 `Services/Verdict/ConnectionProbe.cs`，
+  审计点名的五个位置逐个改造：`FastbootClient.ProbeConnectionAsync`（`IsDeviceConnected` 变成它的
+  Ok&&true 投影）、`DeviceVars.TryReadOutcomeAsync`（getvar 的 unsupported/失败/超时）、
+  `info`/`doctor`（新状态 token `probe-failed`/`probe-timeout`/`probe-unsupported`，
+  **exit 1 而不是 exit 2「无设备」**，并逐变量输出 `unreadable: {kind: reason}`）、
+  `ProcessRunner` 诊断日志（三层空 catch → `DiagnosticLogWriter.TryWrite` + `LastDiagnosticWrite`）、
+  `UserSettings`（`LastLoadOutcome`/`LastSaveOutcome`：损坏仍在改名 `.bad`，但异常类型/目标/回落都有记录）、
+  `LinuxSerialPortFinder.TryReadAttribute`（absent≠读失败）。断言：新增 `tests/CommandOutcomes`（58 条，
+  纯分类器 + 临时目录，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/
+  `devices-unsupported`，14 条，含 info/doctor 的 exit code 与 `device.probe`/`probeReason`）。
+- **冻结面**：`tests/StableParity/boundary.json` 本轮不需要刷新——清单里没有任何文件被改动
+  （`MainWindow.axaml.cs`、`Services/FirmwareUnlocker.cs`、`Services/USBUpdate/*`、`Utils/Crc16.cs`、
+  `Utils/SuperMerger.cs`、`UI/*`、`Security/CryptoUtil.cs`、`Services/OemInfoEditor.cs`、
+  `Services/VcomFlasher.cs` 都未动）。
+- 验证口径：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；
+  `tests/suites.txt` 全量 PASS；**未执行任何 adb/fastboot**（测试里的 fastboot 全是 stub；
+  本轮没有真机动作）。
+
 ## v3.0.0 变更（2026-11-17，主机侧，无设备）
 
 发布前独立复核（不看 lane 自报，逐条对代码位置 + 断言）：round3/round4/round5 与 r6/r7 声称已修的全部条目均有代码与断言证据，`tests/suites.txt` **28/28 rc=0**、两个项目 0 error、CI 的三段 smoke（`--help`/`version`/stub `doctor`=exit 6/MCP `initialize`+`tools/list`）本机手跑通过。清单与逐条证据见 [release-notes/v3.0.0.md](release-notes/v3.0.0.md)。复核过程中只发现两条遗留，均在本轮关闭：
@@ -162,7 +186,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
 | D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | open | GUI 备份调用点见审计原文；超时分支 `Task.WhenAny(..., Task.Delay(10min))`（S34 同源） |
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | open | `Models/FrpBypassResult.cs:34`；`Models/EnableDowngradeResult.cs:37` |
-| D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | open | `Cli/CommandSupport.cs:57-93`；`Utils/ProcessRunner.cs:221-264`；`Services/FastbootClient.cs:53-65`；`Services/UserSettings.cs:341-375`；`Utils/LinuxSerialPortFinder.cs:144-158` |
+| D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | **fixed-in-3.1.0** | 新增可区分结果类型 `Services/Verdict/ReadOutcome.cs`（`ReadOutcomeKind{Ok,Unsupported,Timeout,Failed}` + 带 reason 的 `ReadOutcome<T>` + 纯分类器 `ReadOutcomes`）；`Services/Verdict/ConnectionProbe.cs`（`fastboot devices` 纯分类 + `probe-failed/probe-timeout/probe-unsupported` 状态 token）。五个调用点：`Services/FastbootClient.cs:112-144`（`ProbeConnectionAsync`，`IsDeviceConnected` 只是它的 Ok&&true 投影）；`Cli/CommandSupport.cs:29-121`（`FastbootSession.Connection` 携带探针结论、`DeviceVars.TryReadOutcomeAsync` 区分 unsupported/超时/失败，`TryReadAsync` 保留旧签名但把非 Ok 写进诊断日志）；`Cli/Commands/ReadCommands.cs:60-83`（info/doctor 的 `probe-*` 状态 + **exit 1**，不再并进 exit 2「无设备」；`unreadable` 字段逐变量给 kind+reason）；`Utils/ProcessRunner.cs:420-475`（三层空 catch → `DiagnosticLogWriter.TryWrite` + `LastDiagnosticWrite`，全失败写一行 stderr）；`Services/UserSettings.cs:88-94,350-410`（`LastLoadOutcome`/`LastSaveOutcome`，仍改名 `.bad` 但记录异常类型/目标/回落）；`Utils/LinuxSerialPortFinder.cs:186-223`（`TryReadAttribute`：absent=Unsupported、读取抛错=Failed，不再都是 null）。测试：`tests/CommandOutcomes`（58 条，纯分类器 + 临时目录/临时 sysfs 文件，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/`devices-unsupported`，断言 info/doctor exit 1/5 与 `device.probe`/`probeReason`，14 条）。**误判后果（已消除）**：以前 fastboot 坏掉/超时会被报成「没插设备」（exit 2）或干脆静默，读者照 cable/重插排查；日志写失败、settings 被改名、sysfs 读失败都没有任何痕迹 |
 | D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |
 | D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | open | `Cli/Commands/WriteCommands.cs:711-722`；`Cli/Commands/OtaFlashRunner.cs:51-59` vs `Utils/UpdateApp.cs:229-246` |
 

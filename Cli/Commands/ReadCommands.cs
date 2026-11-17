@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
+using Kirin_Tool.Services.Verdict;
 
 namespace Kirin_Tool.Cli.Commands;
 
@@ -18,6 +19,9 @@ internal sealed class InfoCommand : ICliCommand
         var session = await FastbootSession.TryOpenAsync();
 
         var variables = new SortedDictionary<string, string?>(StringComparer.Ordinal);
+        // D-25: every variable a loader refuses keeps its own kind+reason instead of becoming a
+        // silent null, so "unsupported" and "the read failed" can be read apart from the JSON.
+        var unreadable = new SortedDictionary<string, string>(StringComparer.Ordinal);
         bool psidReadable = false;
         int? partitionCount = null;
 
@@ -26,7 +30,9 @@ internal sealed class InfoCommand : ICliCommand
             foreach (string name in new[] { "product", "version", "serialno", "secure", "unlocked", "chipset", "base-version", "bootloader" })
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                variables[name] = await DeviceVars.TryReadAsync(session.Client, name);
+                ReadOutcome<string> outcome = await DeviceVars.TryReadOutcomeAsync(session.Client, name);
+                if (outcome.Succeeded) variables[name] = outcome.Value;
+                else unreadable[name] = outcome.Describe();
             }
             psidReadable = await DeviceVars.PsidReadableAsync(session.Client);
             partitionCount = await DeviceVars.PartitionCountAsync(session.Client);
@@ -46,14 +52,23 @@ internal sealed class InfoCommand : ICliCommand
         // indistinguishable from "this device has no readable information".
         bool informationallyUseful = session is { Connected: true } &&
             (variables.Any(pair => pair.Value != null) || psidReadable || partitionCount is > 0);
+
+        // D-25 (audit S25): "the device is not in fastboot mode" and "the probe could not run" are two
+        // different answers, and only the first one is about the device. The distinction is the
+        // pure ConnectionProbe status token; the exit codes are the CLI's.
         string deviceStatus = session == null ? "fastboot-missing"
-            : !session.Connected ? "not-connected"
+            : !session.Connection.Succeeded ? ConnectionProbe.StatusToken(session.Connection.Kind)
+            : !session.Connected ? ConnectionProbe.StatusNotConnected
             : !informationallyUseful ? "connected-but-empty"
             : "ok";
         int exit = deviceStatus switch
         {
             "fastboot-missing" => ExitCodes.FileOrVerify,
             "not-connected" => ExitCodes.NoDevice,
+            // Exit 1, not 2: the probe failed / timed out / is unsupported — an environment finding,
+            // not "no device plugged in". Exit 5 stays reserved for "the client cannot be used at all".
+            "probe-failed" or "probe-timeout" => ExitCodes.Usage,
+            "probe-unsupported" => ExitCodes.FileOrVerify,
             // Exit 6, not 0: the command succeeded, but the answer is "nothing is readable here".
             "connected-but-empty" => ExitCodes.Degraded,
             _ => ExitCodes.Ok,
@@ -79,11 +94,15 @@ internal sealed class InfoCommand : ICliCommand
             {
                 connected = session?.Connected ?? false,
                 status = deviceStatus,
+                // D-25: ok / unsupported: ... / timeout: ... / failed: ... — never just "no".
+                probe = session?.Connection.Describe(),
+                probeReason = session != null && !session.Connection.Succeeded ? session.Connection.Reason : null,
                 informationallyUseful,
                 chip,
                 psidReadable,
                 partitionCount,
                 variables = variables.Where(pair => pair.Value != null).ToDictionary(pair => pair.Key, pair => pair.Value!),
+                unreadable,
             },
             capabilities = new
             {
@@ -106,6 +125,8 @@ internal sealed class InfoCommand : ICliCommand
             context.Output.WriteLine($"device: {deviceStatus} (connected: {(session?.Connected == true ? "true" : "false")}, readable info: {informationallyUseful})");
             foreach (var pair in variables.Where(pair => pair.Value != null))
                 context.Output.WriteLine($"  {pair.Key}: {pair.Value}");
+            foreach (var pair in unreadable)
+                context.Output.WriteLine($"  {pair.Key}: ({pair.Value})");
             if (session is { Connected: true })
             {
                 context.Output.WriteLine($"  psid-readable: {psidReadable}");
@@ -118,6 +139,9 @@ internal sealed class InfoCommand : ICliCommand
 
         if (session == null)
             context.Diag("error: fastboot binary not found; set KIRIN_FASTBOOT or install platform-tools");
+        else if (!session.Connection.Succeeded)
+            context.Diag("error: fastboot devices did not answer (" + session.Connection.Describe()
+                + "); that is an environment finding, not \"no device\" (exit " + exit + ")");
         else if (!session.Connected)
             context.Diag("note: no fastboot device detected (exit 2)");
         else if (!informationallyUseful)
@@ -156,6 +180,9 @@ internal sealed class DoctorCommand : ICliCommand
         bool connected = session?.Connected ?? false;
 
         var probes = new SortedDictionary<string, string?>(StringComparer.Ordinal);
+        // D-25: the same per-variable verdict as info, so a refusal is visible as
+        // "unsupported: …" / "failed: …" instead of a missing key.
+        var unreadable = new SortedDictionary<string, string>(StringComparer.Ordinal);
         bool psidReadable = false;
         int? partitionCount = null;
         if (connected && session != null)
@@ -163,7 +190,9 @@ internal sealed class DoctorCommand : ICliCommand
             foreach (string name in new[] { "product", "chipset", "secure", "unlocked", "version" })
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                probes[name] = await DeviceVars.TryReadAsync(session.Client, name);
+                ReadOutcome<string> outcome = await DeviceVars.TryReadOutcomeAsync(session.Client, name);
+                if (outcome.Succeeded) probes[name] = outcome.Value;
+                else unreadable[name] = outcome.Describe();
             }
             psidReadable = await DeviceVars.PsidReadableAsync(session.Client);
             partitionCount = await DeviceVars.PartitionCountAsync(session.Client);
@@ -186,6 +215,17 @@ internal sealed class DoctorCommand : ICliCommand
         string parity = FastbootParity.Classify(fastbootPath, fastbootVersion);
         bool parityOk = string.Equals(parity, FastbootParity.Huawei, StringComparison.Ordinal);
 
+        // D-25 (audit S25): the device probe now has a reason, so the per-check line can say
+        // "the probe did not answer" instead of repeating "no device in fastboot mode".
+        bool probeAnswered = session == null || session.Connection.Succeeded;
+        string probeDetail = session == null
+            ? "no device in fastboot mode"
+            : connected
+                ? (probes.GetValueOrDefault("product") ?? "connected")
+                : session.Connection.Succeeded
+                    ? "no device in fastboot mode"
+                    : session.Connection.Describe();
+
         var checks = new List<object>
         {
             new { name = "fastboot-found", ok = fastbootPath != null, detail = fastbootPath ?? "not found (KIRIN_FASTBOOT / PATH)" },
@@ -193,7 +233,7 @@ internal sealed class DoctorCommand : ICliCommand
             new { name = "fastboot-parity", ok = parityOk, detail = parity + " — " + FastbootParity.Describe(parity) },
             new { name = "adb-found", ok = adbPath != null, detail = adbPath ?? "not found (optional, KIRIN_ADB / PATH)" },
             new { name = "loaders-bundled", ok = loaders.Count > 0, detail = $"{loaders.Count} chip directories under {BundledLoaders.Directory}" },
-            new { name = "fastboot-device", ok = connected, detail = connected ? (probes.GetValueOrDefault("product") ?? "connected") : "no device in fastboot mode" },
+            new { name = "fastboot-device", ok = connected, detail = probeDetail },
             new { name = "psid-readable", ok = psidReadable, detail = psidReadable ? "oem get-psid answered" : "oem get-psid unavailable/rejected" },
             new { name = "ptable-readable", ok = partitionCount is > 0, detail = partitionCount is > 0 ? $"{partitionCount} partitions" : "getvar ptable unavailable" },
         };
@@ -203,6 +243,9 @@ internal sealed class DoctorCommand : ICliCommand
         // (and both branches exit 6).
         string status = fastbootPath == null ? "fastboot-missing"
             : fastbootVersion == null ? "fastboot-unrunnable"
+            // D-25: a probe that could not run comes before any device-level verdict, because there is
+            // no device-level fact to report yet.
+            : !probeAnswered ? ConnectionProbe.StatusToken(session!.Connection.Kind)
             : connected && !informationallyUseful ? "connected-but-empty"
             : !parityOk ? "degraded-fastboot-parity"
             : "ok";
@@ -228,9 +271,12 @@ internal sealed class DoctorCommand : ICliCommand
             device = new
             {
                 connected,
+                probe = session?.Connection.Describe(),
+                probeReason = session != null && !session.Connection.Succeeded ? session.Connection.Reason : null,
                 informationallyUseful,
                 chip,
                 probes = probes.Where(pair => pair.Value != null).ToDictionary(pair => pair.Key, pair => pair.Value!),
+                unreadable,
                 psidReadable,
                 partitionCount,
                 dumpCapable = connected && fastbootPath != null,
@@ -260,6 +306,8 @@ internal sealed class DoctorCommand : ICliCommand
             context.Output.WriteLine($"device: {(connected ? "connected" : "not connected")} chip={chip}");
             foreach (var pair in probes.Where(pair => pair.Value != null))
                 context.Output.WriteLine($"  {pair.Key}: {pair.Value}");
+            foreach (var pair in unreadable)
+                context.Output.WriteLine($"  {pair.Key}: ({pair.Value})");
             if (connected)
             {
                 context.Output.WriteLine($"  psid-readable: {psidReadable}");
@@ -285,6 +333,15 @@ internal sealed class DoctorCommand : ICliCommand
         {
             context.Diag("error: fastboot is present but does not run; check the binary and its permissions");
             return ExitCodes.FileOrVerify;
+        }
+        if (!probeAnswered)
+        {
+            // D-25 (audit S25): exit 1 — the tool could not ask the question. Reporting this as
+            // "no device" (exit 2) sent the reader to the cable instead of the client/permissions.
+            context.Diag("error: fastboot devices did not answer (" + session!.Connection.Describe()
+                + "); status=" + status + " (exit "
+                + (session.Connection.IsUnsupported ? ExitCodes.FileOrVerify : ExitCodes.Usage) + ")");
+            return session.Connection.IsUnsupported ? ExitCodes.FileOrVerify : ExitCodes.Usage;
         }
         if (!parityOk)
         {

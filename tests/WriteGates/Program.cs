@@ -178,6 +178,12 @@ def answer(text, code=0):
     print(text)
     sys.exit(code)
 if args[:1] == ["devices"]:
+    # D-25: the two shapes a broken/unusual client produces, so the CLI's exit code can be asserted.
+    if mode == "devices-error":
+        print("fastboot: error: could not open /dev/bus/usb/001/002", file=sys.stderr)
+        sys.exit(1)
+    if mode == "devices-unsupported":
+        answer("FAILED (remote: unknown command)", 1)
     answer("TEST fastboot")
 if mode == "silent-device" and args[:1] in (["getvar"], ["oem"]):
     # D-08: connected, but every probe is rejected — the "connected but knows nothing" shape.
@@ -858,6 +864,57 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     {
         stubEnvironment.Clear();
         stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    }
+}
+
+// ---------------------------------------------------------------- 14. D-25: probe vs "no device"
+// A failing `fastboot devices` used to be reported exactly like "no phone plugged in" (exit 2),
+// because IsDeviceConnected swallowed every exception into false. A broken client is an environment
+// finding (exit 1), a missing subcommand is its own token, and "no device" stays exit 2.
+{
+    stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    try
+    {
+        stubEnvironment["STUB_MODE"] = "devices-error";
+        (int code, string stdout, string stderr) = Run("info", "--json");
+        Check(code == 1, "D-25: info exits 1 (not 2/no-device) when the devices probe fails (got " + code + "): " + stderr.Trim());
+        using JsonDocument doc = JsonDocument.Parse(stdout);
+        JsonElement device = doc.RootElement.GetProperty("device");
+        Check(device.GetProperty("status").GetString() == "probe-failed", "D-25: info names the probe failure in device.status");
+        Check(!device.GetProperty("connected").GetBoolean(), "D-25: a failed probe is still not reported as connected");
+        Check((device.GetProperty("probe").GetString() ?? "").StartsWith("failed:", StringComparison.Ordinal),
+            "D-25: device.probe carries the outcome kind");
+        Check((device.GetProperty("probeReason").GetString() ?? "").Contains("could not open"),
+            "D-25: device.probeReason carries the tool's own words");
+
+        (code, stdout, stderr) = Run("doctor", "--json");
+        Check(code == 1, "D-25: doctor exits 1 when the devices probe fails (got " + code + "): " + stderr.Trim());
+        using JsonDocument doctorDoc = JsonDocument.Parse(stdout);
+        Check(doctorDoc.RootElement.GetProperty("status").GetString() == "probe-failed", "D-25: doctor carries the same token");
+        Check(doctorDoc.RootElement.GetProperty("ok").GetBoolean() == false, "D-25: doctor ok is false for a failed probe");
+        JsonElement probeCheck = doctorDoc.RootElement.GetProperty("checks").EnumerateArray()
+            .First(entry => entry.GetProperty("name").GetString() == "fastboot-device");
+        Check(probeCheck.GetProperty("ok").GetBoolean() == false, "D-25: the fastboot-device check is not ok");
+        Check((probeCheck.GetProperty("detail").GetString() ?? "").Contains("failed:"),
+            "D-25: the fastboot-device check prints the reason instead of 'no device in fastboot mode'");
+
+        stubEnvironment["STUB_MODE"] = "devices-unsupported";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 5, "D-25: an unsupported devices probe exits 5 (client cannot be used) (got " + code + ")");
+        using JsonDocument unsupportedDoc = JsonDocument.Parse(stdout);
+        Check(unsupportedDoc.RootElement.GetProperty("device").GetProperty("status").GetString() == "probe-unsupported",
+            "D-25: 'unknown command' is probe-unsupported, not probe-failed");
+
+        stubEnvironment["STUB_MODE"] = "ok";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 0, "D-25: a working probe is unchanged (exit 0) (got " + code + ")");
+        using JsonDocument okDoc = JsonDocument.Parse(stdout);
+        Check(okDoc.RootElement.GetProperty("device").GetProperty("probe").GetString() == "ok",
+            "D-25: a working probe reports probe=ok");
+    }
+    finally
+    {
+        stubEnvironment.Clear();
     }
 }
 

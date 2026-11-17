@@ -21,6 +21,7 @@
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
 using Kirin_Tool.Services.Diagnostics;
+using Kirin_Tool.Services.Verdict;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System;
@@ -417,18 +418,35 @@ namespace Kirin_Tool.Utils
             WriteDiagnostic($"{Path.GetFileName(executablePath)} {arguments}", output);
         }
 
+        /// <summary>
+        /// The outcome of the last <see cref="WriteDiagnostic"/> call. Default (never written) is an
+        /// <see cref="ReadOutcomeKind.Ok"/> with an empty value; a failed write leaves the reason here
+        /// so a caller — or a test — can tell "the log is quiet" from "the log could not be written".
+        /// </summary>
+        public static ReadOutcome<string> LastDiagnosticWrite { get; private set; }
+
+        /// <summary>
+        /// Append one human diagnostic entry. Prefers a log dir next to the executable; when that is
+        /// not writable (AppImage squashfs, root-owned pacman install) it falls back to the user's XDG
+        /// state directory. D-25 (audit S23): the three empty catches became one recorded outcome plus
+        /// a single line on stderr — a lost diagnostic is no longer invisible.
+        /// </summary>
         public static void WriteDiagnostic(string source, string output)
+        {
+            LastDiagnosticWrite = TryWriteDiagnostic(source, output);
+            if (!LastDiagnosticWrite.Succeeded)
+                Console.Error.WriteLine("warning: diagnostic log not written (" + LastDiagnosticWrite.Describe() + ")");
+        }
+
+        /// <summary>Same as <see cref="WriteDiagnostic"/> but returns where the entry went.</summary>
+        public static ReadOutcome<string> TryWriteDiagnostic(string source, string output)
         {
             try
             {
                 string fileName = $"kirintool_log_{DateTime.Now:yyyy_MM_dd}.log";
                 string timestamp = DateTime.Now.ToString("HH:mm:ss");
-                string cmdText = source;
-                string logMessage = $"[{timestamp}] {cmdText}\n{output}\n\n";
+                string logMessage = $"[{timestamp}] {source}\n{output}\n\n";
 
-                // Prefer a log dir next to the executable; when that is not
-                // writable (AppImage squashfs, root-owned pacman install),
-                // fall back to the user's XDG state directory.
                 string exeLogDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log");
                 string? xdgState = Environment.GetEnvironmentVariable("XDG_STATE_HOME");
                 if (string.IsNullOrWhiteSpace(xdgState))
@@ -437,24 +455,22 @@ namespace Kirin_Tool.Utils
                 }
                 string userLogDir = Path.Combine(xdgState, "Kirin-Tool", "log");
 
-                foreach (var logDir in new[] { exeLogDir, userLogDir })
-                {
-                    try
+                return DiagnosticLogWriter.TryWrite(new[] { exeLogDir, userLogDir }, fileName, logMessage,
+                    path =>
                     {
-                        Directory.CreateDirectory(logDir);
+                        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
                         lock (LogLock)
                         {
-                            File.AppendAllText(Path.Combine(logDir, fileName), logMessage);
+                            File.AppendAllText(path, logMessage);
                         }
-                        return;
-                    }
-                    catch
-                    {
-                        // try the next candidate
-                    }
-                }
+                    });
             }
-            catch {}
+            catch (Exception ex)
+            {
+                // Building the candidate list itself failed (no HOME, malformed XDG_STATE_HOME): record
+                // it instead of the previous blanket swallow.
+                return ReadOutcomes.FromException<string>(ex, "diagnostic log");
+            }
         }
     }
 }
