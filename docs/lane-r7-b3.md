@@ -5,7 +5,17 @@
 
 ## 0. 基线
 
-（见下文各节；基线干净与否在此记录）
+`git status` 开工时干净，HEAD = `cd060f8`（main），分支 `fix/r7-b3-writegates`。
+三条债的 commit：
+
+| 债 | commit | 类型 |
+|---|---|---|
+| D-16（S14）电量闸门 | `7687cd5` | 行为变更（低电量现在拒绝写入） |
+| D-06（H20/H23）pwn 跳转表 | `cb5d3e4` | 行为保持 |
+| D-14（BB-13/BB-16 GUI）dload + sentinel | `e9155cc` | 行为保持（删除前多一道拒绝） |
+| 报告 | `6786f9c` | docs |
+
+三条改动都用「新套件 + 源码扫描」双保险钉住，防止回退到裸字面量/无校验删除。
 
 ## 1. D-16（S14）电量闸门 — commit `7687cd5`
 
@@ -134,6 +144,73 @@ boundary.json，同 commit 刷新哈希并写明「行为保持型：提取/传�
 现在是「拒绝删除并继续 + 记录证据」，调用方控制流一致（提取仍使用该目录）。
 注：`USBUpdateFlasherService.cs` 不在 boundary 清单内。
 
-## 4. 全量验证
+## 4. 全量验证（真跑，非「相关目录能编译」）
 
-状态: 待做
+### 两条 build 的最后一行
+```
+$ dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false     （-t:Rebuild 全量）
+    3 个警告        0 个错误        # 3 条均为既有 AVLN3001（XAML 运行时加载器不可达，仓库已知）
+$ dotnet build KirinTool.Cli/KirinTool.Cli.csproj -c Release -p:NuGetAudit=false
+    3 个警告        0 个错误        # 同一批 AVLN3001 的重复报告；CLI 自身 0 警告
+```
+
+### 每个 suite 的 PASS/FAIL 汇总（`tests/suites.txt`，28 套）
+| suite | rc | 最后一行 |
+|---|---|---|
+| FlashPolicy | 0 | 55 flash policy checks passed. |
+| StableParity | 0 | 35 stable parity checks passed; no hardware accessed. |
+| FastbootReads | 0 | PASS partial failed table |
+| VcomPromptUi | 0 | PASS dead FlashPartitionsWithProgress(List<PartitionInfo>) overload removed |
+| GuiQol | 0 | 8 GUI QoL checks passed; headless, no device access. |
+| Extractor | 0 | 43 extractor checks passed. |
+| UsbDiagnostics | 0 | 49 USB diagnostic checks passed; simulated transport only. |
+| UsbRedlineGate | 0 | 13 redline gate checks passed; no device accessed. |
+| UsbTransport | 0 | PASS extractor: the refused entry left nothing behind inside either |
+| UsbUpdateUi | 0 | PASS rendered rows, reboot success/failure and completion controls; sources=True |
+| UsbUpdateVerdict | 0 | all 39 USB-update verdict checks passed |
+| OemInfoUi | 0 | 5 OEMInfo UI checks passed; headless, no device access. |
+| UdevNotice | 0 | 24 udev notice checks passed; no host rule writes or USB operations. |
+| Kirin9000 | 0 | 102 Kirin9000/PSID checks passed; no device operations. |
+| WriteGates | 0 | 141 write gate checks passed. |
+| McpProtocol | 0 | 17 MCP protocol checks passed. |
+| OtaPlan | 0 | 20 ota plan checks passed. |
+| PreOpBackup | 0 | BackupPlan: all checks passed |
+| SurfaceParity | 0 | 415 surface parity checks passed. |
+| OpLogging | 0 | 168 operation-logging checks passed; no device, fastboot or adb was contacted. |
+| LogMerge | 0 | 79 log-merge checks passed; no device, fastboot or adb was contacted. |
+| VcomUnlockCli | 0 | 98 VCOM unlock parity checks passed; no hardware accessed. |
+| ApprovalGate | 0 | 111 approval-gate checks passed. |
+| VerdictHonesty | 0 | 81 verdict-honesty checks passed; no hardware accessed. |
+| VersionMetadata | 0 | 7 version-metadata checks passed; no device was contacted. |
+| **BatteryGate（新）** | 0 | BatteryGate ALL PASS (45 checks) |
+| **PwnJumpTable（新）** | 0 | PwnJumpTable ALL PASS (53 checks) |
+| **DloadSentinel（新）** | 0 | DloadSentinel ALL PASS (38 checks) |
+
+**28/28 套件 rc=0，0 FAIL。** 三个新套件（`BatteryGate`/`PwnJumpTable`/`DloadSentinel`）
+已写入 `tests/suites.txt`，两条 CI 流水线会自动纳入。
+
+### 复现命令（本报告全部数字均由此产生）
+```
+cd /home/xuqianhui/src/wt/r7-b3-writegates
+dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false
+dotnet build KirinTool.Cli/KirinTool.Cli.csproj -c Release -p:NuGetAudit=false
+while read -r t; do case "$t" in ''|'#'*) continue ;; esac; \
+  echo "== $t"; dotnet run --project "tests/$t" -c Release -p:NuGetAudit=false || echo "FAILED $t"; \
+done < tests/suites.txt
+```
+
+### 冻结面汇总（boundary.json 刷新，全部为行为保持型）
+| 文件 | 触发的债 | 原因 |
+|---|---|---|
+| `MainWindow.axaml.cs` | D-16、D-14 | 写入口加前置电量判据；dload 服务改私有临时目录 |
+| `Services/VcomFlasher.cs` | D-06 | 跳转字面量改为查表（wire/时序未变） |
+| `Services/USBUpdate/SoftwareTestpointService.cs` | D-14 | 删除点前置 sentinel（命令/时序未变） |
+
+未动：`Services/FirmwareUnlocker.cs`（D-06 用测试断言对齐，不改表）、`loaders/`、
+fastboot payload 二进制、任何硬件 blob、串口时序/协议、`docs/debt-register.md`。
+
+### 纪律自查
+- 零真实设备操作：全程未执行 adb / fastboot / VCOM / 串口 / usb 探针，未跑
+  `VcomOpenProbe`/`UsbUpdateProbe`（也不在 `suites.txt` 里）。
+- 三条债各自独立 commit：`7687cd5`(D-16) / `cb5d3e4`(D-06) / `e9155cc`(D-14)，报告 `6786f9c`。
+- 时间盒内完成，无卡住条目，无遗留阻塞点。
