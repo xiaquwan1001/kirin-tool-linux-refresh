@@ -8,6 +8,29 @@
 没有证据的条目不写「已修」——不确定的一律标 `unknown` 并写清缺什么证据。
 
 
+## v3.1.0 变更（2026-11-17，主机侧，无设备）
+
+本轮清偿 D-18…D-27 里 5 条（可移植性/可读性/隐藏步骤），每条一个 commit、各有可断言测试，
+**未连接任何设备**（无 adb/fastboot/lsusb/串口读写；wire 命令、时序、重试次数一个字节未动）。
+
+- **D-26 → fixed-in-3.1.0**：拔插线/关写保护的 SoC 名单收敛到 `Services/SocWriteRequirements.cs`（唯一来源 +
+  只读集合），三个消费点（GUI 服务、GUI oeminfo 分支、CLI）全部改调它；`tests/SocWriteRequirements`（118 checks）。
+- **D-18 → fixed-in-3.1.0**：Linux modem-line 判据从「驱动名 == option」改成 `Services/ModemLinePolicy.cs` 的能力
+  探测（证据 / 未证实假设 / 强制 / 显式端口 四分），未证实的清线路径 open 失败时回退历史设置并记录；
+  `port.open`、`doctor.vcom.modemLines`、`vcom-unlock` 计划三处可观测；`tests/ModemLinePolicy`（49 checks）。
+- **D-19 → fixed-in-3.1.0**：`KIRIN_LOADERS_DIR` 落地（`--loader-dir` > env > 默认），解析来源成为可打印字段
+  （`loaderDirectorySource`、`doctor.loaders.source`）；冻结面（`<root>/<cpu>/<stage>.ktl`、`fastbootf.ktl`）
+  未改，命名规则单一化到 `LoaderDirectory.StageFileName`；`tests/LoaderDirectory`（104 checks）。
+- **D-20 → fixed-in-3.1.0**：先核对事实（`loaders/` 本来就由 csproj 的 Content glob 带进 publish 树；本机实跑
+  publish.sh rc=0，18 chips / 56 .ktl），再把「必须存在」变成构建期断言 `packaging/check-loaders.sh`
+  （publish.sh 后置、build-deb.sh 前置、PKGBUILD check()、AppRun 注释）；`tests/LoaderPackaging`（48 checks）。
+- **D-22 → fixed-in-3.1.0**：udev 规则收敛成跟包走的单一文本（嵌入资源，`GROUP="uucp"` + `TAG+="uaccess"`，
+  deb 不再 sed 改写），检查改成「规则文本 + 当前会话上下文」两段结论并给可操作提示；`tests/UdevNotice`（49 checks）。
+- 冻结面刷新：只改了 `Services/FirmwareUnlocker.cs`、`Services/VcomFlasher.cs`、`MainWindow.axaml.cs` 三个 hash，
+  `tests/StableParity/boundary.json` 的 `reference` 逐条写明行为变更理由（结论/来源字段，协议未变）。
+- 验证口径：两个 `dotnet build` 0 error；`tests/suites.txt` 全量 0 FAIL（新增 4 套：SocWriteRequirements /
+  ModemLinePolicy / LoaderDirectory / LoaderPackaging）。
+
 ## v2.4.15 变更（2026-11-13）
 
 - **D-01 → fixed-in-2.4.15**：`oeminfo` 拆成 `oeminfo-convert`（PlanOnly，只在本机构造镜像）与
@@ -277,11 +300,11 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | P12 | CLI 候选链含 5 级相对回溯 + `/usr/bin` | 同上；且 `doctor` 不区分血统 | fixed-in-2.4.26（D-07：回落在每个结果里可见，doctor 报血统） |
 | P13 | `doctor.ok = 找到 && 能跑` | `ok:true` 被当成「环境健康」 | fixed-in-2.4.26（D-07/D-08：非华为血统 ok=false 且 exit 6） |
 | P14 | 随包 fastboot 需联网构建；仓库里只有 `fastboot/payload` | 未跑构建时必然落到 P11 | open |
-| P15 | 打包产物假定含 `loaders/`，`publish.sh` 不产出 | VCOM 解锁报「loader 目录不存在」→ 被读成本机权限问题 | open（D-20） |
+| P15 | 打包产物假定含 `loaders/`，publish 路径无断言 | VCOM 解锁报「loader 目录不存在」→ 被读成本机权限问题 | fixed-in-3.1.0（D-20：`packaging/check-loaders.sh` 在 publish/deb 期失败） |
 | P01 | Windows 用 WMI `Caption LIKE '%(COM%'` + `Substring` 解析 | 设备名不含 `(COMx)` 时静默 null → 报「没有 VCOM 设备」而不是「端口名解析失败」 | open |
-| P02 | Linux 按驱动名 `option` 决定关 RTS/DTR | 驱动换成 `cdc_acm`/`usbserial` 时表现为「连上但一发就断」 | open（D-18） |
+| P02 | Linux 按驱动名 `option` 决定关 RTS/DTR | 驱动换成 `cdc_acm`/`usbserial` 时表现为「连上但一发就断」 | fixed-in-3.1.0（D-18：`ModemLinePolicy` 能力探测 + 事件/doctor 可观测） |
 | P05 / P06 | 只认 `/dev/ttyUSB*`、`ttyACM*`、`ttyGS*`，接口匹配只认 `ff/13/23` | 描述符一变 → 「未找到端口」，被读成设备没进模式 | open |
-| P08 | 静态读 udev 文本判「权限已覆盖」 | `TAG+="uaccess"` 在 SSH/无桌面会话无效 → 报「规则齐全」但 `open` 失败 | open（D-22） |
+| P08 | 静态读 udev 文本判「权限已覆盖」 | `TAG+="uaccess"` 在 SSH/无桌面会话无效 → 报「规则齐全」但 `open` 失败 | fixed-in-3.1.0（D-22：规则文本 + 会话上下文两段结论 + 提示） |
 | P21 | MCP 协议版本固定 | 新客户端协商行为未定义 → 工具「没出现」被读成服务没起 | open（D-21） |
 | P27 | 依赖英文前缀 `(bootloader)`/`OKAY`/`FAILED` | loader 改语言/加前缀 → 结论退化 Unknown，看起来像「设备异常」 | fixed-in-2.4.25（D-10：行首 token + 失败优先，Unknown 有明确文案） |
 | P04 | Linux 与 Windows 是同一协议的两套传输实现 | Linux 侧行为差异无法用 Windows 结果背书 | open（无对照测试） |
@@ -315,6 +338,6 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 ## 统计（v2.4.14 基线）
 
 - 已关闭（v3.0.0 复核后）：D-01…D-17 全部 fixed；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27 关闭。
-- 仍 open：D-18…D-27 共 10 条（供货/打包/协议版本/udev 文案/GUI 隐式步骤/OR 语义/失败-不支持-超时未分/名单四份/知识重复），按危险度排序后 TOP3 = D-25（失败与不支持仍不可区分）、D-23（GUI 隐式步骤）、D-20（打包缺 loaders）。
+- v3.1.0 关闭 D-18 / D-19 / D-20 / D-22 / D-26 后，仍 open：D-21 / D-23 / D-24 / D-25 / D-27 共 5 条（MCP 协议版本固定 / GUI 隐式步骤 / OR 语义死代码 / 失败-不支持-超时未分 / 知识重复），按危险度排序后 TOP3 = D-25（失败与不支持仍不可区分）、D-23（GUI 隐式步骤）、D-24（OR 语义陷阱）。
 - wontfix：4 组（B 类 2 条 + 协议常量 13 条 + 纯 UI handler 17 个）。
 - unknown：审计报告中未逐行复核的剩余条目（见附录 E），数量取决于复核粒度，不在此虚报。
