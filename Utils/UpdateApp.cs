@@ -81,10 +81,8 @@ namespace Kirin_Tool.Utils
 
             long currentPosition = 0;
 
-            const byte magicByte0 = 0x55;
-            const byte magicByte1 = 0xAA;
-            const byte magicByte2 = 0x5A;
-            const byte magicByte3 = 0xA5;
+            // D-27: the entry marker lives in Utils/UpdateAppFormat so the strict parser and the
+            // USB-update extractor cannot drift apart (one marker, one alias table).
             const int scanBufferSize = 1024 * 1024;
             var scanBuffer = new byte[scanBufferSize + 4];
 
@@ -101,8 +99,7 @@ namespace Kirin_Tool.Utils
 
                 for (int i = 0; i <= bytesRead - 4; i++)
                 {
-                    if (scanBuffer[i] != magicByte0 || scanBuffer[i + 1] != magicByte1 ||
-                        scanBuffer[i + 2] != magicByte2 || scanBuffer[i + 3] != magicByte3)
+                    if (!UpdateAppFormat.IsHeaderMagic(scanBuffer.AsSpan(i, UpdateAppFormat.HeaderMagicLength)))
                     {
                         continue;
                     }
@@ -228,24 +225,9 @@ namespace Kirin_Tool.Utils
             return Encoding.ASCII.GetString(bytes.ToArray());
         }
 
-        private string GetPartitionName(string rawName)
-        {
-            if (string.IsNullOrWhiteSpace(rawName))
-                return "UNKNOWN";
-
-            string name = rawName.ToLowerInvariant().Trim();
-
-            return name switch
-            {
-                "hisiufs_gpt" => "ptable",
-                "efi" => "ptable",
-                "ufsfw" => "ufs_fw",
-                "erecovery_ramdis" => "erecovery_ramdisk",
-                "recovery_ramdis" => "recovery_ramdisk",
-                "vbmeta_hw_produc" => "vbmeta_hw_product",
-                _ => name
-            };
-        }
+        // D-27: the alias table is UpdateAppFormat.PartitionAliases; this parser used to carry
+        // its own copy (Cli/Commands/OtaFlashRunner carried a third). Behaviour is unchanged.
+        private string GetPartitionName(string rawName) => UpdateAppFormat.PartitionName(rawName);
 
         public async Task ExtractPartition(PartitionInfo partition, string outputPath)
         {

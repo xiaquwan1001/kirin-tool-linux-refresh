@@ -18,6 +18,16 @@
   里给出 `requested/returned/outcome/supported/detail`，同时 stderr 打 `protocol negotiation mismatch:`；
   `McpServer.Initialize` 只调用它（`Cli/Mcp/McpServer.cs`）。断言 `tests/McpProtocol`（34 条，含
   `Cli/**/*.cs` 只允许一处版本字面量的源码扫描）。
+- **D-27 → fixed-in-3.1.0**（H49/H74/S42/S43）：三份重复知识各合成一份实现，语义取更权威的一方、行为不变：
+  - UPDATE.APP 条目标记 `55 AA 5A A5` → `Utils/UpdateAppFormat.cs`（`IsHeaderMagic`），
+    `Utils/UpdateApp.cs`（严格解包）与 `Services/USBUpdate/USBUpdateApp.cs`（USB Update 解包，两处）都改调它；
+  - 条目名别名表 → `Utils/UpdateAppFormat.PartitionAliases` + `PartitionName`（解析器语义：空白→`UNKNOWN`）
+    与 `LoaderPartitionName`（计划器语义：未映射名原样小写返回），`Utils/UpdateApp.GetPartitionName` 与
+    `Cli/Commands/OtaFlashRunner` 的私有 `NameAliases` 全部改为调用同一张表；
+  - `OEM_INFO`/0x400 版本探测 → `Services/OemInfoEditor.DetectVersion(byte[])`（实例 `DetectedVersion` 同一函数），
+    `Cli/Commands/WriteCommands.TryDetectOemInfoVersion` 只剩「读文件 + 调用」，不再自己扫块。
+  断言 `tests/KnowledgeDedup`（44 条：旧规则冻结快照、别名/标记/探测语义、以及「只有一份实现」的源码扫描 +
+  「调用点真的调用它」的源码断言，防止扫描空转）。
 - 验证：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 全量 rc=0。
 
 
@@ -177,7 +187,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | open | `Models/FrpBypassResult.cs:34`；`Models/EnableDowngradeResult.cs:37` |
 | D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | open | `Cli/CommandSupport.cs:57-93`；`Utils/ProcessRunner.cs:221-264`；`Services/FastbootClient.cs:53-65`；`Services/UserSettings.cs:341-375`；`Utils/LinuxSerialPortFinder.cs:144-158` |
 | D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |
-| D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | open | `Cli/Commands/WriteCommands.cs:711-722`；`Cli/Commands/OtaFlashRunner.cs:51-59` vs `Utils/UpdateApp.cs:229-246` |
+| D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | **fixed-in-3.1.0** | 单一实现：`Utils/UpdateAppFormat.cs`（`IsHeaderMagic` + `PartitionAliases` + `PartitionName`/`LoaderPartitionName`）；`Services/OemInfoEditor.DetectVersion`（`Services/OemInfoEditor.cs`）。调用点：`Utils/UpdateApp.cs`（标记 + 名字）、`Services/USBUpdate/USBUpdateApp.cs`（标记 ×2）、`Cli/Commands/OtaFlashRunner.cs`（名字，私有表已删）、`Cli/Commands/WriteCommands.cs`（探测）。`tests/KnowledgeDedup` 44 条（含源码扫描「只有一份实现」+「调用点真的调用」） |
 
 ### 2.3 已声明 / 有意不修（wontfix）
 

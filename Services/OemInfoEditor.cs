@@ -54,18 +54,30 @@ namespace Kirin_Tool.Services
             }
         }
 
-        private int DetectOemVersion()
-        {
-            for (int offset = 0; offset < _binaryData.Length; offset += BlockSize)
-            {
-                if (offset + 12 > _binaryData.Length) break;
+        private int DetectOemVersion() => DetectVersion(_binaryData) ?? -1;
 
-                if (_binaryData.Skip(offset).Take(8).SequenceEqual(MagicBytes))
+        /// <summary>
+        /// D-27 (H49/S42): the OEMINFO magic/0x400 version probe, stated once.
+        /// <c>Cli/Commands/WriteCommands</c> used to carry its own copy of this loop (same magic,
+        /// same 0x400 block step, same version at block+8) just to print "detected OEMINFO
+        /// version"; that copy is gone and the CLI calls this. A block whose header is truncated
+        /// (no room for the 12-byte header) is not a match, and an image without the magic
+        /// returns <c>null</c> — the caller decides whether that is a refusal or a silence.
+        /// </summary>
+        public static int? DetectVersion(byte[]? data)
+        {
+            if (data == null) return null;
+
+            for (int offset = 0; offset < data.Length; offset += BlockSize)
+            {
+                if (offset + 12 > data.Length) break;
+
+                if (data.AsSpan(offset, MagicBytes.Length).SequenceEqual(MagicBytes))
                 {
-                    return System.BitConverter.ToInt32(_binaryData, offset + 8);
+                    return System.BitConverter.ToInt32(data, offset + 8);
                 }
             }
-            return -1;
+            return null;
         }
 
         /// <summary>Longest accepted model/vendor value (a GPT name is 36 chars; 64 is generous).</summary>

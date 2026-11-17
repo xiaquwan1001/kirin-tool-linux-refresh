@@ -353,7 +353,8 @@ namespace Kirin_Tool.Services.USBUpdate
 
                 for (int i = 0; i <= bytesRead - 4; i++)
                 {
-                    if (buffer[i] == 0x55 && buffer[i + 1] == 0xAA && buffer[i + 2] == 0x5A && buffer[i + 3] == 0xA5)
+                    // D-27: one entry marker (Utils/UpdateAppFormat) for every UPDATE.APP parser.
+                    if (UpdateAppFormat.IsHeaderMagic(buffer.AsSpan(i, UpdateAppFormat.HeaderMagicLength)))
                     {
                         // long: a >2 GiB package used to truncate the offset into a negative int
                         // and the following Seek threw (audit 2026-11-15 round3 §1.3).
@@ -388,7 +389,7 @@ namespace Kirin_Tool.Services.USBUpdate
 
             headerWriter.Write(magic);
 
-            if (magic[0] != 0x55 || magic[1] != 0xAA || magic[2] != 0x5A || magic[3] != 0xA5)
+            if (!UpdateAppFormat.IsHeaderMagic(magic))
                 return (0, "", new byte[0]);
 
             int headerLength = reader.ReadInt32();

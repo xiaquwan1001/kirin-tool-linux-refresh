@@ -45,21 +45,6 @@ internal sealed record OtaFlashOutcome(string Partition, bool Ok, string? Error)
 internal static class OtaFlashRunner
 {
     /// <summary>
-    /// UPDATE.APP entry names are not fastboot partition names: the archive carries
-    /// HISIUFS_GPT (the GPT blob) while the loader exposes it as "ptable", and the loader
-    /// matches names case-sensitively (lower case). Mirrors Utils/UpdateApp.GetPartitionName.
-    /// </summary>
-    private static readonly Dictionary<string, string> NameAliases = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["hisiufs_gpt"] = "ptable",
-        ["efi"] = "ptable",
-        ["ufsfw"] = "ufs_fw",
-        ["erecovery_ramdis"] = "erecovery_ramdisk",
-        ["recovery_ramdis"] = "recovery_ramdisk",
-        ["vbmeta_hw_produc"] = "vbmeta_hw_product",
-    };
-
-    /// <summary>
     /// Resolve every planned partition against the loader's own partition list, so a bad
     /// name fails before anything is written. Unresolved names are reported, not guessed.
     /// </summary>
@@ -88,8 +73,11 @@ internal static class OtaFlashRunner
         foreach (string planned in plannedNames)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            // D-27: UPDATE.APP entry names are not fastboot partition names (the archive carries
+            // HISIUFS_GPT, the loader exposes "ptable") — one alias table, in Utils/UpdateAppFormat,
+            // shared with the parser that reads the archive.
             string lower = planned.Trim().ToLowerInvariant();
-            string candidate = NameAliases.TryGetValue(lower, out string? alias) ? alias : lower;
+            string candidate = UpdateAppFormat.LoaderPartitionName(planned);
 
             if (available == null)
             {
