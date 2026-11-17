@@ -231,5 +231,5 @@ $ dotnet build KirinTool.Cli/KirinTool.Cli.csproj -c Release -p:NuGetAudit=false
 ```
 9f13dd9 fix(surface): usb-update-flash 补 CLI/MCP 面（D-12 / BB-09）
 b5d6384 fix(merge): sparse TotalBlocks 与 chunk 块数一致性校验（M2 / audit §1.2）
-8bd2c72 fix(fastboot): oem 命令补 argv 列表重载（round5 §10）
+（第三条）fix(fastboot): oem 命令补 argv 列表重载（round5 §10）   # 该 commit 的 hash 会随本报告 amend 变化，取 git log --oneline -3
 ```
