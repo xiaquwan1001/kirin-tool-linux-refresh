@@ -129,3 +129,65 @@ PASS doctor still exits 6 for the lineage reason, not because of the device (got
 
 **行为变更声明**：`info` 在 connected-but-empty 时由 exit 0 改为 exit 6；`doctor` 同理。新增字段全部是 additive
 （`device.status`、`device.informationallyUseful`、顶层 `status`），原有键与含义未动；`boundary.json` 未改。
+
+
+### D-15（BB-19）——rescue 目标分区不再由 CPU 下拉决定
+
+**判据（改前 / 改后）**
+
+- 改前：`MainWindow.axaml.cs:2149`（实测行号）`RescuePartitionPlan.ForChip(GetSelectedCpu())` —— 目标是
+  `ERECOVERY` 三件套还是 `ERECOVERY_KERNEL` 三件套，完全由宿主机下拉框决定；下拉框重启即复位，与
+  fastboot 里那台手机毫无关系，点错一下就会把另一族的 rescue 镜像写进设备。
+- 改后：
+  1. **先问设备**：新增 `Services/RescueChipResolver.cs`（纯函数）+ `MainWindow.ResolveRescueChipAsync()`，
+     用既有只读通道 `getvar chipset`（与 CLI `info`/`doctor` 同一条命令，未新增任何协议命令）取真实平台；
+     设备答出的 chip 若在 `ChipCapabilities.IsKnownChip` 白名单内 ⇒ `Source = Device`，**下拉框被忽略**；
+  2. **否则必须显式确认**：`Source = ManualSelection` 时弹 `Rescue targets: manual CPU selection` 确认框
+     （正文写明「device did not report a platform this build knows (getvar chipset: 设备原话)」+
+     「uses the CPU selected in the dropdown: manual CPU selection (hisiNNN) → ERECOVERY…」+
+     「This is a manual selection, not something the device told us」），默认按钮是 Cancel，用户不点
+     「Continue with manual selection」就直接 return，一个字节都不发；
+  3. **GUI 显示来源**：进度窗标题变成
+     `Reboot to USB Update Progress — rescue targets: device platform (hisi9000)` /
+     `… — rescue targets: manual CPU selection (hisi980)`，并写一行诊断日志
+     `rescue targets: chip=… source=… device-report=…`；
+  4. Kirin9000 的「required recovery images missing」预检也改用**解析后的** chip
+     （`rescueTarget.Chip == Kirin9000`），否则「设备是 9000、下拉是 980」时预检会漏。
+
+**改动文件**
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `Services/RescueChipResolver.cs` | 新增：`RescueChipSource`（Device/ManualSelection）、`RescueChipResolution`（Chip/Source/DeviceReport/SourceLabel/DeviceReportLabel）、`Resolve(deviceReport, selectedCpu)`；`Normalize` 同时接受已解析值 `hisi9000` 与原始行 `(bootloader) chipset: hisi9000` |
+| `MainWindow.axaml.cs` | 新增 `ResolveRescueChipAsync()`；`HandleRebootToUsbUpdate` 用解析结果替代 `GetSelectedCpu()`，加手动来源确认框、标题来源后缀、诊断行；预检改用解析后的 chip |
+| `tests/StableParity/boundary.json` | `MainWindow.axaml.cs` 的 sha256 刷新（旧 `2aaa6ed8…` → 新 `C2CE6A28…`），`reference` 追加本条说明。**这是全 lane 唯一动冻结面的地方**：D-15 的修复点就在这个文件里，行为契约本身（GUI 写入路径的命令序列/时序/审批闸门）未变，且 `StableParity` 35 条断言全过 |
+| `tests/Kirin9000/Program.cs` | 8 条解析器断言 + 救援流程改为同时应答「手动来源确认框」与「审批框」+ 新增「设备报 hisi9000 / 下拉 hisi980」场景 |
+
+**断言（`tests/Kirin9000`，全部真跑）**
+
+```
+PASS device-reported platform wins over the dropdown
+PASS the raw getvar chipset answer is kept for the dialog/log
+PASS the provenance label names the device platform
+PASS no device answer degrades to the dropdown, marked manual
+PASS the manual provenance label says the CPU was selected by hand
+PASS an absent device answer is named, not blank
+PASS an unknown platform string is not treated as a known chip
+PASS the device answer is normalised before matching
+PASS the manual-selection dialog says the target list is a hand choice, not a device fact
+PASS the manual-selection dialog names the CPU the rescue plan will use
+PASS a device that cannot name its platform forces an explicit manual-selection confirmation
+PASS the progress window names the target list as a manual CPU selection: Reboot to USB Update Progress — rescue targets: manual CPU selection (hisi9000)
+PASS no manual-selection dialog when the device reports its platform
+PASS the progress window names the device platform as the source: Reboot to USB Update Progress — rescue targets: device platform (hisi9000)
+PASS the handler asks the device for its platform before planning the rescue write
+PASS the rescue aliases follow the device platform (hisi9000), not the dropdown (hisi980): rescue_recovery|rescue_recovery_ramdisk|rescue_recovery_vendor
+PASS real handler dispatches experimental rescue aliases
+PASS bootloader failure shown in progress rows
+PASS failed writes prevent USB Update entry command
+122 Kirin9000/PSID checks passed; no device operations.
+```
+
+**行为变更声明**：设备能报平台时，rescue 目标改由设备决定（这是本条债务的目的）；设备报不出时多一次**显式**确认，
+且在确认前不发任何命令（测试里「缺 ERECOVERY 时不写」「失败不进 USB Update」等既有断言继续通过）。
+命令内容、命令顺序、超时与重试未改。

@@ -2125,6 +2125,33 @@ namespace Kirin_Tool
         // Battery below 50% is surfaced as a non-modal warning banner on the Device
         // Information page (see RefreshBatteryBannerAsync); writes are deliberately
         // NOT blocked here — warning-only by decision 2026-11-12.
+        /// <summary>
+        /// D-15 / audit BB-19: ask the device which platform it is before choosing the rescue target
+        /// list. `getvar chipset` is the same read-only probe the CLI's `info`/`doctor` use, so this
+        /// adds no new protocol command. Any failure (no answer, rejected probe, timeout, an unknown
+        /// platform string) degrades to <see cref="RescueChipSource.ManualSelection"/>; it never aborts
+        /// the rescue flow, because a device that cannot name itself is exactly the case where the
+        /// operator must decide — and confirm.
+        /// </summary>
+        private async Task<RescueChipResolution> ResolveRescueChipAsync()
+        {
+            string? deviceChipset = null;
+            try
+            {
+                ProcessResult result = await _fastbootClient.QueryVariableAsync("chipset");
+                if (result.IsSuccess)
+                {
+                    deviceChipset = FastbootReadResponses.Variable(result, "chipset");
+                }
+            }
+            catch (Exception)
+            {
+                deviceChipset = null;
+            }
+
+            return RescueChipResolver.Resolve(deviceChipset, GetSelectedCpu());
+        }
+
         private async Task HandleRebootToUsbUpdate()
         {
             using var cancellationTokenSource = new CancellationTokenSource();
@@ -2146,7 +2173,28 @@ namespace Kirin_Tool
             string lockOutput = await _fastbootClient.OemCommandAsync("lock-state info");
             string fbLockState = ParseOemLine(lockOutput, "FB LockState:", "Unknown");
 
-            var rescuePlan = RescuePartitionPlan.ForChip(GetSelectedCpu());
+            // D-15 / audit BB-19: the rescue target list comes from the device platform when the device
+            // can name one; the CPU dropdown is only a fallback, and a fallback is confirmed by hand.
+            RescueChipResolution rescueTarget = await ResolveRescueChipAsync();
+            if (rescueTarget.Source == RescueChipSource.ManualSelection)
+            {
+                bool continueWithManualSelection = await _dialogService.ShowConfirmDialog(
+                    "Rescue targets: manual CPU selection",
+                    "The device did not report a platform this build knows (getvar chipset: "
+                    + rescueTarget.DeviceReportLabel + ").\n\n"
+                    + "The rescue plan therefore uses the CPU selected in the dropdown: "
+                    + rescueTarget.SourceLabel + " → "
+                    + string.Join(", ", RescuePartitionPlan.ForChip(rescueTarget.Chip).Select(entry => entry.Image))
+                    + ".\n\nThis is a manual selection, not something the device told us. Continue?",
+                    "Continue with manual selection",
+                    "Cancel");
+                if (continueWithManualSelection != true)
+                {
+                    return;
+                }
+            }
+
+            var rescuePlan = RescuePartitionPlan.ForChip(rescueTarget.Chip);
             var rescuePartitions = rescuePlan.Select(entry => entry.Image).ToList();
 
             ApprovalAdmission? rescueAdmission = await RequestGuiApprovalAsync(ApprovalRequests.For(
@@ -2160,7 +2208,12 @@ namespace Kirin_Tool
             }
             var partitionInfos = rescuePartitions.Select(p => new PartitionInfo { Name = p, Size = 0, FormattedSize = "" }).ToList();
             var progressDialog = new ProcessDialogUapp(partitionInfos, cancellationTokenSource);
-            progressDialog.Title = "Reboot to USB Update Progress";
+            // The provenance is part of the visible title, so the window never implies a device fact it
+            // does not have.
+            progressDialog.Title = "Reboot to USB Update Progress — rescue targets: " + rescueTarget.SourceLabel;
+            ProcessRunner.WriteDiagnostic("rescue",
+                "rescue targets: chip=" + rescueTarget.Chip + " source=" + rescueTarget.SourceLabel
+                + " device-report=" + rescueTarget.DeviceReportLabel);
 
             bool dialogClosed = false;
             progressDialog.RequestClose += (s, e) =>
@@ -2216,7 +2269,7 @@ namespace Kirin_Tool
                 // a null path would fail inside UpdateApp exactly as before the annotation work.
                 using (var updateApp = new UpdateApp(baseUpdatePath!))
                 {
-                    if (GetSelectedCpu() == ChipCapabilities.Kirin9000)
+                    if (rescueTarget.Chip == ChipCapabilities.Kirin9000)
                     {
                         var missing = rescuePartitions.Where(name => !updateApp.Partitions.Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))).ToHashSet();
                         if (missing.Count > 0)
