@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json;
 using Kirin_Tool.Services;
 using Kirin_Tool.Services.Approval;
+using Kirin_Tool.Services.Verdict;
 using Kirin_Tool.Utils;
 
 string root = Path.GetFullPath(args.Length == 0 ? "." : args[0]);
@@ -1160,6 +1161,33 @@ try { Directory.Delete(stubDir, true); } catch { }
         Check(failed == (false, "failed", 3), "D-12: a failed transfer maps to failed/exit 3 (got " + failed + ")");
     }
     finally { try { Directory.Delete(d12Dir, true); } catch { } }
+}
+
+// ---------------------------------------------------------------- M4: gzip expansion bound
+// audit 2026-11-15 round3 §1.2 / round5 §7. The bound used to live inline in the CLI and could
+// not be asserted without writing half a gigabyte of scratch data; it is now
+// Services/Verdict/GzipExtractionLimit.Limit and the decompressor calls exactly this function.
+{
+    long floor = GzipExtractionLimit.FloorBytes;
+    Check(floor == 512L * 1024 * 1024, "M4: the floor is 512 MiB");
+    Check(GzipExtractionLimit.Limit(1L << 20, long.MaxValue) == floor,
+        "M4: a 1 MiB payload is bounded by the floor, not by 32x its size (" + GzipExtractionLimit.Limit(1L << 20, long.MaxValue) + ")");
+    Check(GzipExtractionLimit.Limit(64L << 20, long.MaxValue) == 64L * 32 << 20,
+        "M4: above ~16 MiB the 32x rule binds (" + GzipExtractionLimit.Limit(64L << 20, long.MaxValue) + ")");
+    Check(GzipExtractionLimit.Limit(64L << 20, 100L << 20) == 100L << 20,
+        "M4: free space caps a larger size bound, so a small tmpfs is never filled");
+    Check(GzipExtractionLimit.Limit(64L << 20, floor >> 2) == floor >> 2,
+        "M4: a staging filesystem smaller than the floor is the binding limit");
+    Check(GzipExtractionLimit.Limit(0, long.MaxValue) == floor && GzipExtractionLimit.Limit(-1, long.MaxValue) == floor,
+        "M4: a zero/negative compressed length still gets the floor instead of a zero limit");
+    Check(GzipExtractionLimit.Limit(64L << 20, -1) == 64L * 32 << 20 && GzipExtractionLimit.Limit(64L << 20, 0) == 64L * 32 << 20,
+        "M4: an unknown free space (-1/0) falls back to the size bound, never to 'no limit'");
+
+    string runner = File.ReadAllText(Path.Combine(root, "Cli/Commands/OtaFlashRunner.cs"));
+    Check(runner.Contains("GzipExtractionLimit.Limit(compressedLength, freeSpace)", StringComparison.Ordinal),
+        "M4: the decompressor uses the asserted helper (no second copy of the formula)");
+    Check(!runner.Contains("Math.Max(512L * chunk", StringComparison.Ordinal),
+        "M4: the old inline formula is gone");
 }
 
 Console.WriteLine(checks + " write gate checks passed.");

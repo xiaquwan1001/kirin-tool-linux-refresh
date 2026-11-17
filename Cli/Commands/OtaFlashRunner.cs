@@ -379,7 +379,9 @@ internal static class OtaFlashRunner
         long freeSpace;
         try { freeSpace = new DriveInfo(Path.GetFullPath(tempDirectory)).AvailableFreeSpace; }
         catch (Exception) { freeSpace = long.MaxValue; }
-        long limit = Math.Min(freeSpace, Math.Max(512L * chunk, compressedLength * 32));
+        // M4: the bound itself is Services/Verdict/GzipExtractionLimit.cs so the assertion and the
+        // decompressor cannot drift apart (tests/WriteGates asserts the helper's three cases).
+        long limit = Services.Verdict.GzipExtractionLimit.Limit(compressedLength, freeSpace);
         long written = 0;
 
         try

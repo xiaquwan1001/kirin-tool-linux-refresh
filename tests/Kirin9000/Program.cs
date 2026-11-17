@@ -262,6 +262,61 @@ Check(!owner.FindControl<Border>("Kirin9000Notice")!.IsVisible,"switching back c
  } finally { try{Directory.Delete(oemDir,true);}catch{} }
 }
 
+// ------------------------------------------------- S19: a refused write-protection removal stops the write
+// audit 2026-11-15 round5 §3 left one item open: the Convert OEM branch dropped the loader's
+// answer to oeminfoerase-disablewp, so a refusal still ran on into the two field writes and was
+// never shown. It is now classified like any other loader answer: anything but OKAY stops the
+// operation with nothing written and a "Write Failed" dialog that names the step.
+{
+ string wpDir=Path.Combine(Path.GetTempPath(),"kirin9000-oem-wp-"+Guid.NewGuid().ToString("N"));
+ Directory.CreateDirectory(wpDir);
+ void PumpWp(Func<bool> ready,int seconds=45) {var until=DateTime.UtcNow.AddSeconds(seconds);while(!ready()){Dispatcher.UIThread.RunJobs();if(DateTime.UtcNow>until)throw new Exception("S19 flow timed out; owned windows: ["+string.Join(", ",owner.OwnedWindows.Select(w=>w.GetType().Name+":"+w.Title))+"]");Thread.Sleep(10);}Dispatcher.UIThread.RunJobs();}
+ try {
+  string wpCalls=Path.Combine(wpDir,"calls"), wpStub=Path.Combine(wpDir,"fake-fastboot");
+  string[] wpScript = {
+   "#!/usr/bin/python3",
+   "import sys,json",
+   "args=sys.argv[1:]",
+   "open(" + System.Text.Json.JsonSerializer.Serialize(wpCalls) + ",'a').write(json.dumps(args)+'\\n')",
+   "if args==['devices']:",
+   "    print('TEST fastboot')",
+   "elif args[:1]==['getvar']:",
+   "    print('(bootloader) product: NOH-AN00')",
+   "elif args[:2]==['oem','oeminfoerase-disablewp']:",
+   "    print('FAILED (remote: write protection cannot be erased here)')",
+   "else:",
+   "    print('OKAY')",
+  };
+  File.WriteAllText(wpStub,string.Join((char)10,wpScript));
+  if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(wpStub,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+  typeof(MainWindow).GetField("_fastbootClient",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(owner,new FastbootClient(wpStub));
+  combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi990")==true);Dispatcher.UIThread.RunJobs();
+  owner.FindControl<TextBox>("TxtDeviceModel")!.Text="NOH-AN00";
+  owner.FindControl<TextBox>("TxtVendor")!.Text="hw-cn";
+  File.WriteAllText(wpCalls,"");
+  typeof(MainWindow).GetMethod("BtnConvertOem_Click",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(owner,[new Button(),new RoutedEventArgs(Button.ClickEvent)]);
+  PumpWp(()=>owner.OwnedWindows.Any(w=>w.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true));
+  var wpApproval=owner.OwnedWindows.Single(w=>w.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true);
+  wpApproval.GetVisualDescendants().OfType<TextBox>().First().Text="I UNDERSTAND oeminfo-flash";
+  Dispatcher.UIThread.RunJobs();
+  wpApproval.GetVisualDescendants().OfType<Button>().Single(b=>b.Content?.ToString()=="Approve once").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+  Dispatcher.UIThread.RunJobs();
+  PumpWp(()=>owner.OwnedWindows.OfType<Kirin_Tool.UI.ProgressDialog>().Any());
+  var wpProgress=owner.OwnedWindows.OfType<Kirin_Tool.UI.ProgressDialog>().Single();
+  PumpWp(()=>wpProgress.FindControl<Button>("CloseButton")!.IsVisible);
+  var wpArgv=File.ReadAllLines(wpCalls).Select(line=>System.Text.Json.JsonSerializer.Deserialize<string[]>(line)!).ToArray();
+  var wpCommands=wpArgv.Where(a=>a.Length>1&&a[0]=="oem").Select(a=>a[1]).ToArray();
+  Check(wpCommands.SequenceEqual(new[]{"oeminfoerase-disablewp"}),
+   "S19: a refused write-protection removal stops before the model/vendor writes (" + string.Join(", ", wpCommands) + ")");
+  string wpStatus=wpProgress.FindControl<TextBlock>("OverallStatusTextBlock")?.Text??"";
+  Check(wpStatus.Contains("write protection",StringComparison.OrdinalIgnoreCase),
+   "S19: the dialog names the failed step instead of dropping the answer (" + wpStatus.Trim() + ")");
+  Check((wpProgress.Title??"").Contains("Write Failed",StringComparison.Ordinal),
+   "S19: the outcome is a failure, not a completion (" + (wpProgress.Title??"") + ")");
+  wpProgress.Close();Dispatcher.UIThread.RunJobs();
+ } finally { try{Directory.Delete(wpDir,true);}catch{} }
+}
+
 // ------------------------------------------------- R2: closing the window cancels the operation
 // The 2026-11-15 orphan: the GUI exited while a fastboot child kept running for four minutes.
 // Here a stub fastboot dumps "forever"; closing the window must cancel the operation, kill the

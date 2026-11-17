@@ -2749,7 +2749,25 @@ namespace Kirin_Tool
                     if (shouldDisableWp)
                     {
                         progressDialog.UpdateOverallStatus("Disabling write protection...");
-                        await _deviceWriteOps.OemInfoEraseWriteProtectionAsync(ticket);
+                        string writeProtectionOutput = await _deviceWriteOps.OemInfoEraseWriteProtectionAsync(ticket);
+
+                        // S19 (audit 2026-11-15 round5 §3): this answer used to be dropped on the
+                        // floor, so a refused write-protection removal still ran on into the two
+                        // field writes and was never named anywhere the operator could see it.
+                        // A field write into a region that is still protected cannot be verified,
+                        // so anything but an explicit OKAY stops here with nothing written.
+                        CommandOutcome writeProtectionOutcome = ClassifyCommandOutput(writeProtectionOutput);
+                        if (writeProtectionOutcome != CommandOutcome.Succeeded)
+                        {
+                            progressDialog.ProgressItems[0].StatusText = "Failed";
+                            progressDialog.ProgressItems[1].StatusText = "Skipped";
+                            progressDialog.UpdateOverallStatus(writeProtectionOutcome == CommandOutcome.Unknown
+                                ? $"Write protection was not confirmed removed: the loader printed neither OKAY nor ERROR, so the model/vendor writes were not attempted. Last output: {OutputTail(writeProtectionOutput)}"
+                                : $"Failed to remove the oeminfo write protection, so the model/vendor writes were not attempted. Last output: {OutputTail(writeProtectionOutput)}");
+                            progressDialog.ShowCloseButton(false, "Write Failed");
+                            await dialogTask;
+                            return;
+                        }
                     }
 
                     progressDialog.UpdateOverallStatus($"Writing model: {model}...");
