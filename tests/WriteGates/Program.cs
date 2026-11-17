@@ -178,6 +178,9 @@ def answer(text, code=0):
     sys.exit(code)
 if args[:1] == ["devices"]:
     answer("TEST fastboot")
+if mode == "silent-device" and args[:1] in (["getvar"], ["oem"]):
+    # D-08: connected, but every probe is rejected — the "connected but knows nothing" shape.
+    answer("FAILED (remote: command not allowed)", 1)
 if args[:1] == ["reboot"]:
     answer("FAILED (remote: reboot not allowed)", 1) if mode == "reboot-fail" else answer("OKAY")
 if args[:1] == ["flash"]:
@@ -740,6 +743,70 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     finally
     {
         stubEnvironment.Clear();
+    }
+}
+
+// ---------------------------------------------------------------- 13. D-08: connected vs useful
+// "connected" and "the loader answered something" used to be the same verdict: a device that
+// accepted the connection and rejected every getvar produced connected:true + exit 0, exactly like
+// a healthy device. They are now two judgements (device.status / device.informationallyUseful) and
+// two exit codes (0 vs 6).
+{
+    stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    stubEnvironment["STUB_MODE"] = "silent-device";
+    try
+    {
+        (int code, string stdout, string stderr) = Run("info", "--json");
+        Check(code == 6, "info against a connecting but silent loader exits 6/degraded (got " + code + "): " + stderr.Trim());
+        using JsonDocument doc = JsonDocument.Parse(stdout);
+        JsonElement device = doc.RootElement.GetProperty("device");
+        Check(device.GetProperty("connected").GetBoolean(), "info still reports connected:true for a silent loader (no lie about the link)");
+        Check(device.GetProperty("status").GetString() == "connected-but-empty",
+            "info distinguishes 'connected-but-empty' from 'ok' in device.status");
+        Check(device.GetProperty("informationallyUseful").GetBoolean() == false,
+            "info says the device is not informationally useful");
+        Check(device.GetProperty("variables").EnumerateObject().Any() == false,
+            "info's variables map is empty (the loader rejected every getvar)");
+
+        (code, stdout, stderr) = Run("doctor", "--json");
+        Check(code == 6, "doctor against the same silent loader exits 6/degraded (got " + code + "): " + stderr.Trim());
+        using JsonDocument doctorDoc = JsonDocument.Parse(stdout);
+        JsonElement doctorRoot = doctorDoc.RootElement;
+        Check(doctorRoot.GetProperty("status").GetString() == "connected-but-empty",
+            "doctor carries the same device-level status token");
+        Check(doctorRoot.GetProperty("ok").GetBoolean() == false,
+            "doctor ok is false when the device connects and answers nothing");
+        Check(doctorRoot.GetProperty("device").GetProperty("informationallyUseful").GetBoolean() == false,
+            "doctor device.informationallyUseful is false");
+        Check(doctorRoot.GetProperty("checks").EnumerateArray()
+                .First(entry => entry.GetProperty("name").GetString() == "fastboot-device")
+                .GetProperty("ok").GetBoolean(),
+            "the per-check table keeps the two judgements apart: fastboot-device is ok (it IS connected) while psid/ptable are not");
+
+        // Contrast: a loader that answers product is useful, and only the lineage keeps doctor off 0.
+        stubEnvironment["STUB_MODE"] = "ok";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 0, "info against an answering loader still exits 0 (got " + code + "): " + stderr.Trim());
+        using JsonDocument healthyDoc = JsonDocument.Parse(stdout);
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("status").GetString() == "ok",
+            "info device.status is ok when a variable is readable");
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("informationallyUseful").GetBoolean(),
+            "info device.informationallyUseful is true when a variable is readable");
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("variables").GetProperty("product").GetString() == "ELS-AN00",
+            "the readable variable is still reported unchanged");
+
+        (code, stdout, _) = Run("doctor", "--json");
+        using JsonDocument healthyDoctorDoc = JsonDocument.Parse(stdout);
+        Check(healthyDoctorDoc.RootElement.GetProperty("device").GetProperty("informationallyUseful").GetBoolean(),
+            "doctor agrees the answering device is informationally useful");
+        Check(healthyDoctorDoc.RootElement.GetProperty("status").GetString() == "degraded-fastboot-parity",
+            "with a usable device the remaining status is the lineage one (the stub is not the bundled client)");
+        Check(code == 6, "doctor still exits 6 for the lineage reason, not because of the device (got " + code + ")");
+    }
+    finally
+    {
+        stubEnvironment.Clear();
+        stubEnvironment["KIRIN_FASTBOOT"] = stub;
     }
 }
 

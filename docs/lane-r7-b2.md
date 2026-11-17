@@ -77,3 +77,55 @@ PASS doctor --json reports degraded:[system-fastboot-fallback] (R4 旧断言，�
 「不得无条件为 true」，两条 CI 冒烟与 `tests/WriteGates` 的旧断言据此同步更新（不是放松：旧断言只要求 0，
 新断言固定 6 + `ok:false` + `parity:unknown`）。`tests/StableParity/boundary.json` 未改。
 
+
+
+### D-08（F17 / F18）——「连上」与「问出了东西」分成两个判据
+
+**判据（改前 / 改后）**
+
+- 改前：`doctor.ok = found && runs`（与设备无关）；`info` 是 `connected ? exit 0 : exit 2`。
+  一个接受连接、却拒绝所有 `getvar` 的 loader 得到的结果与健康设备**完全一样**（`connected:true` + exit 0 + 空
+  `variables`），于是「连上但一无所知」无法与「连上且正常」区分（审计 F17 / F18）。
+- 改后：两个命令都算一个 `informationallyUseful`（`connected && (任一 getvar 有值 || oem get-psid 有值 ||
+  ptable 可读)`），并给出三态 `status`，JSON 与 exit code 双通道可区分：
+
+| 场景 | `info` | `doctor` | exit |
+| :--- | :--- | :--- | :--- |
+| 没有 fastboot | `device.status=fastboot-missing` | `status=fastboot-missing` | 5 |
+| 有 fastboot、没有设备 | `not-connected` | `no-device`（仅在人读摘要里） | 2（doctor 保持 0/6 语义见下） |
+| 连上但一无所知 | `connected-but-empty` + `informationallyUseful:false` | `status=connected-but-empty` + `device.informationallyUseful:false` + `ok:false` | **6** |
+| 连上且能读出变量 | `ok` + `informationallyUseful:true` | `ok`（血统为 huawei 时）/ `degraded-fastboot-parity` | 0 / 6 |
+
+`doctor` 的 `status` 优先级：设备级发现优先（`connected-but-empty` 直接回答「为什么每次读都失败」），
+血统事实另有 `fastboot.parity` 与 `fastboot-parity` per-check，两者都落到 exit 6。
+`doctor` 里 `fastboot-device` per-check 仍为 `ok=true`（它确实连上了），`psid-readable`/`ptable-readable` 为
+`--` —— per-check 表本身就能看出「连上」与「问得出东西」是两件事。
+
+**改动文件**：`Cli/Commands/ReadCommands.cs`（两个命令的 `informationallyUseful` / `status` / exit 映射、
+人读输出的 `device: <status> (connected: …, readable info: …)`、stderr 上的具名警告）、
+`tests/WriteGates/Program.cs`（stub 新增 `STUB_MODE=silent-device`：`devices` 有设备、其余全部 `FAILED`）。
+
+**断言（`tests/WriteGates` §13，全部真跑）**
+
+```
+PASS info against a connecting but silent loader exits 6/degraded (got 6): warning: device is connected but answered no readable variable (exit 6); check the fastboot lineage (info --json fastboot.parity) before blaming the cable
+PASS info still reports connected:true for a silent loader (no lie about the link)
+PASS info distinguishes 'connected-but-empty' from 'ok' in device.status
+PASS info says the device is not informationally useful
+PASS info's variables map is empty (the loader rejected every getvar)
+PASS doctor against the same silent loader exits 6/degraded (got 6): warning: fastboot parity unknown — lineage unverified: not the bundled client; reads against Huawei temporary loaders may fail; set KIRIN_FASTBOOT to the bundled client (exit 6)
+PASS doctor carries the same device-level status token
+PASS doctor ok is false when the device connects and answers nothing
+PASS doctor device.informationallyUseful is false
+PASS the per-check table keeps the two judgements apart: fastboot-device is ok (it IS connected) while psid/ptable are not
+PASS info against an answering loader still exits 0 (got 0)
+PASS info device.status is ok when a variable is readable
+PASS info device.informationallyUseful is true when a variable is readable
+PASS the readable variable is still reported unchanged
+PASS doctor agrees the answering device is informationally useful
+PASS with a usable device the remaining status is the lineage one (the stub is not the bundled client)
+PASS doctor still exits 6 for the lineage reason, not because of the device (got 6)
+```
+
+**行为变更声明**：`info` 在 connected-but-empty 时由 exit 0 改为 exit 6；`doctor` 同理。新增字段全部是 additive
+（`device.status`、`device.informationallyUseful`、顶层 `status`），原有键与含义未动；`boundary.json` 未改。
