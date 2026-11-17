@@ -32,6 +32,7 @@ public static class CliRunner
         new RebootUsbUpdateCommand(),
         new OemInfoFlashCommand(),
         new DowngradeEraseCommand(),
+        new UsbUpdateFlashCommand(),
         new LogsCommand(),
     };
 

@@ -42,6 +42,7 @@ kirin-tool-cli flash-ota base.app --yes    # real write of all non-redline parti
 |---|---|---|
 | `flash-ota`、`flash-xml` | **RealWrite** | **真实刷写分区**（MCP 路径没有 dry-run）；红线分区仍需 `--allow-redline`（仅 CLI） |
 | `vcom-unlock` | **RealWrite** | **真实上传 loader 到内存**（不碰任何分区），与 GUI「Unlock Fastboot」同一实现；详见下节 |
+| `usb-update-flash` | **RealWrite** | **经 USB Update 通道刷整包**（与 GUI「USB Update 模式」同一个 `USBUpdateFlasherService.FlashPartitions`，结论三态 verified/partial/failed → applied/partial/failed）；不可逆，需 `--yes --allow-redline` + stdin 手输 `I UNDERSTAND usb-update-flash`；设备必须已在 USB Update 模式（该命令不发模式进入命令）。MCP 侧需 `confirm:true` 且在运行中的 GUI 里带外批准 |
 | `oeminfo`、`downgrade-enable` | **PlanOnly** | 只确认计划，**永远不写设备**，一律 exit 4（`oeminfo` 只在宿主机上生成镜像，`downgrade-enable` 只打印 4 条 `oem oeminfoerase-*ver`） |
 | `oeminfo-flash` | **RealWrite** | **真实写入 oeminfo 分区**（红线、不可逆，需 `--yes --allow-redline` + stdin 手输 `I UNDERSTAND oeminfo-flash`；MCP 侧需 `confirm:true` 且在运行中的 GUI 里带外批准） |
 | `downgrade-erase` | **RealWrite** | **真实擦除 oeminfo 版本字段** `amss/base/cust/preload`（红线、不可逆，需 `--yes --allow-redline` + stdin 手输 `I UNDERSTAND downgrade-erase`；MCP 侧同上）。与 `downgrade-enable` 的关系见 [downgrade-gate.md](downgrade-gate.md) |

@@ -849,6 +849,98 @@ try { Directory.Delete(stubDir, true); } catch { }
     finally { try { Directory.Delete(xmlDir, true); } catch { } }
 }
 
+// ---------------------------------------------------------------- 13. D-12 usb-update-flash
+// BB-09: the GUI could burn a whole package over the USB-update channel; the CLI/MCP could not.
+// These checks pin the new face without a device: the registry row, the fact that both faces call
+// the *same* service method, that the gate refuses before the transfer starts for every missing
+// acknowledgement, and that the three-state verdict maps onto the shared write report.
+{
+    var row = Kirin_Tool.Services.Capabilities.CapabilityRegistry.ById("usb-update-flash");
+    Check(row != null, "D-12: capability 'usb-update-flash' is registered");
+    Check(row!.CliCommand == "usb-update-flash" && row.McpTool == "usb_update_flash"
+            && row.GuiHandler == "StartFullOtaButton_Click",
+        "D-12: GUI + CLI + MCP faces are declared on the registry row");
+    Check(row.WriteKind == Kirin_Tool.Services.Capabilities.CapabilityWriteKind.Write && row.NeedsApproval,
+        "D-12: it is a gated write capability (not read-only, not plan-only)");
+    Check(row.ServiceMethod == "USBUpdateFlasherService.FlashPartitions",
+        "D-12: the registry names the service method (got '" + row.ServiceMethod + "')");
+    Check(row.Reversibility == Kirin_Tool.Services.Approval.ApprovalReversibility.Irreversible,
+        "D-12: the transfer is declared irreversible (a full-package burn cannot be undone)");
+
+    // Same service method from both faces: this is the parity claim, checked on the sources so it
+    // cannot drift into "the CLI re-implements the unpack loop".
+    string guiSource = File.ReadAllText(Path.Combine(root, "MainWindow.axaml.cs"));
+    Check(guiSource.Contains("_usbUpdateFlasherService.FlashPartitions(", StringComparison.Ordinal),
+        "D-12: the GUI's USB Update path calls USBUpdateFlasherService.FlashPartitions");
+    string cliSource = File.ReadAllText(Path.Combine(root, "Cli/Commands/UsbUpdateFlashCommand.cs"));
+    Check(cliSource.Contains("service.FlashPartitions(", StringComparison.Ordinal),
+        "D-12: the CLI command calls the same USBUpdateFlasherService.FlashPartitions");
+
+    // The gate stops the run before any transport is opened: each missing acknowledgement gets its
+    // own refusal and the service's own log lines never appear.
+    string d12Dir = Path.Combine(Path.GetTempPath(), "kirin-d12-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(d12Dir);
+    try
+    {
+        string package = Path.Combine(d12Dir, "Base_UPDATE.APP");
+        File.WriteAllBytes(package, Array.Empty<byte>());
+
+        (int code, string stdout, string stderr) = Run("usb-update-flash", package, "--json");
+        Check(code == 4, "D-12: usb-update-flash without --yes exits 4 (got " + code + "); stderr: " + stderr.Trim());
+        using (JsonDocument doc = JsonDocument.Parse(stdout))
+        {
+            Check(doc.RootElement.GetProperty("gate").GetString() == "refused"
+                    && doc.RootElement.GetProperty("applied").GetBoolean() == false,
+                "D-12: the refusal is applied=false, gate=refused");
+        }
+        Check(!stderr.Contains("usb-update:", StringComparison.Ordinal),
+            "D-12: the transfer never starts when the gate refuses (no service log lines)");
+
+        (code, stdout, stderr) = Run("usb-update-flash", package, "--yes", "--json");
+        Check(code == 4 && stderr.Contains("allow-redline", StringComparison.Ordinal),
+            "D-12: --yes alone is refused: an irreversible transfer also needs --allow-redline (stderr: " + stderr.Trim() + ")");
+
+        (code, stdout, stderr) = Run("usb-update-flash", package, "--yes", "--allow-redline", "--json");
+        Check(code == 4 && stderr.Contains("I UNDERSTAND usb-update-flash", StringComparison.Ordinal),
+            "D-12: --yes --allow-redline on a non-interactive stdin is refused with the exact phrase (stderr: " + stderr.Trim() + ")");
+        Check(!stderr.Contains("usb-update:", StringComparison.Ordinal),
+            "D-12: neither acknowledgement level reaches the transfer");
+
+        // UsbUpdateVerdict -> WriteReport (docs/usb-update-verdict.md). Device-free: the mapping is
+        // the rule, the verdict is a plain record.
+        MethodInfo mapVerdict = typeof(FastbootClient).Assembly
+            .GetType("Kirin_Tool.Cli.Commands.UsbUpdateFlashCommand")!
+            .GetMethod("MapVerdict", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!;
+
+        Kirin_Tool.Services.USBUpdate.UsbUpdateVerdict Verdict(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome outcome) =>
+            new(outcome,
+                new[] { "boot" },
+                outcome == Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Verified ? new[] { "boot" } : Array.Empty<string>(),
+                Array.Empty<Kirin_Tool.Services.USBUpdate.UsbUpdateSkip>(),
+                outcome == Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed ? new[] { "boot" } : Array.Empty<string>(),
+                outcome != Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed,
+                "test verdict",
+                Array.Empty<Kirin_Tool.Services.USBUpdate.UsbUpdateEvent>());
+
+        (bool Applied, string Gate, int Exit) Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome outcome)
+        {
+            object report = mapVerdict.Invoke(null, new object[] { Verdict(outcome), new { test = true } })!;
+            Type type = report.GetType();
+            return ((bool)type.GetProperty("Applied")!.GetValue(report)!,
+                    (string)type.GetProperty("Gate")!.GetValue(report)!,
+                    (int)type.GetProperty("ExitCode")!.GetValue(report)!);
+        }
+
+        var verified = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Verified);
+        Check(verified == (true, "applied", 0), "D-12: a verified transfer maps to applied/exit 0 (got " + verified + ")");
+        var partial = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Partial);
+        Check(partial == (true, "partial", 3), "D-12: a partial transfer maps to partial/exit 3 (got " + partial + ")");
+        var failed = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed);
+        Check(failed == (false, "failed", 3), "D-12: a failed transfer maps to failed/exit 3 (got " + failed + ")");
+    }
+    finally { try { Directory.Delete(d12Dir, true); } catch { } }
+}
+
 Console.WriteLine(checks + " write gate checks passed.");
 
 /// <summary>

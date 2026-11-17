@@ -140,6 +140,25 @@ public static class CapabilityRegistry
             Reversibility: ApprovalReversibility.Irreversible,
             ServiceMethod: "DeviceWriteOps.EnableDowngradeAsync"),
 
+        // BB-09 / D-12: the GUI's "USB Update mode" flash of a whole package had no CLI/MCP
+        // face at all (`flash-ota` is fastboot only). Same service method as the GUI button
+        // (`USBUpdateFlasherService.FlashPartitions`), so the unpack order, the super merge, the
+        // post-discovery redline decision and the verified/partial/failed verdict are shared;
+        // what is new here is only the CLI/MCP face plus the shared gate in front of it. The
+        // transfer is irreversible (it writes boot-critical partitions), so the gate demands the
+        // typed confirm phrase even though the GUI's own pre-scan confirmation is a plain modal.
+        new("usb-update-flash", "USB Update 模式刷整包", "usb-update-flash", "usb_update_flash", "StartFullOtaButton_Click",
+            CapabilityWriteKind.Write,
+            ["file", "files", "partitions", "work-dir", "allow-redline", "no-backup", "backup-dir", "require-backup", "yes", "json"],
+            ["逐分区经 USB Update 通道传输整包镜像（真实写入；与 GUI 的 USB Update 模式同一个 service 方法）",
+             "红线段分区在解包后才可见，服务内 EnforceRedlineWrite 判定：未 allow-redline 即拒绝且本次 0 字节写入",
+             "结论三态 verified/partial/failed（UsbUpdateVerdict → WriteReport）；只有 verified 才是 applied/exit 0",
+             "写前 pre-op 备份（与 flash-ota 同一 helper；无 fastboot 会话时备份未取，--require-backup 即拒绝）"],
+            Approval: CapabilityApprovalKind.Once,
+            Reversibility: ApprovalReversibility.Irreversible,
+            ServiceMethod: "USBUpdateFlasherService.FlashPartitions",
+            Tool: "usb"),
+
         // ---------- 红线 / 不可逆写：三面齐备，必须手输确认串 ----------
         new("write-sn", "永久改写 NVE 序列号", "write-sn", "write_sn", "HandleWriteSerialNumber",
             CapabilityWriteKind.Write,
