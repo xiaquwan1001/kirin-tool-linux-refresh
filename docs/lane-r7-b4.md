@@ -78,7 +78,55 @@ dotnet run --project tests/McpProtocol -> 17 MCP protocol checks passed.
 
 ## 2. M2：sparse `TotalBlocks` 上界校验
 
-（未开始）
+**判据（改前）**：`Utils/SparseDisk.cs` 里 `SparseHeader.TotalBlocks` 只被读进结构体，
+**全仓库没有任何一处读它**（`grep TotalBlocks` 唯一命中是定义处）。也就是说：`SuperMerger`
+把两个分片拼成 `super.img` 时，header 声明的「整镜像展开成多少 512/4096-byte 块」是**无人校验的自述**；
+一个 TotalBlocks 与自己 chunk 列表矛盾的镜像照样会被合并、并被上层刷进 `super` 分区。
+
+**处置**：新增纯判定件 `Services/Verdict/SparseBlockSum.cs`
+（`SparseChunkFact` + `SparseBlockSumVerdict` + `SparseBlockSum.Evaluate`），规则与 libsparse 读回时一致：
+
+| chunk 类型 | 折算块数 |
+| :--- | :--- |
+| raw `0xCAC1` | `(TotalSize - 12) / BlockSize`，**必须整除**，否则 failed |
+| fill `0xCAC2` / dontcare `0xCAC3` | `ChunkSize`（header 自己声明的块数） |
+| crc32 `0xCAC4` | 0（4 字节校验和，不占块） |
+| 其它 | failed（未知类型） |
+
+`sum(chunk blocks) != TotalBlocks` ⇒ `Token = failed`，`Consistent = false`，带
+`DeclaredBlocks`/`AccountedBlocks`/`Reason`。类型常量集中进 `Utils/SparseDisk.cs` 的
+`SparseConstants`（`CHUNK_TYPE_RAW/FILL/DONT_CARE/CRC32`），不自造第二套。
+
+`Utils/SuperMerger.cs` 里接两处（`EnforceBlockSum`）：大分片的 walk 顺带累计 chunk 事实后校验；
+小分片用新增的 `ReadChunkFacts`（只 seek 读 chunk header，不读 payload）走一遍。不一致即抛
+`InvalidDataException`（消息带 `block-sum verdict failed — <Reason>`），合并**不产生输出文件**，
+上层 `USBUpdateFlasherService` / `OtaFlashRunner` / GUI 的现有异常路径把它报成失败。
+
+**行为保持**：合法输入的合并字节与输出 layout 完全没变——`tests/StableParity` 的
+Windows golden byte 测试（CRC×reverse 四种）仍逐字节相等；新增的只是对自相矛盾 header 的拒绝，
+以及小分片多一遍「只读 chunk header」的扫描（不读 payload，不改变合并结果）。
+
+**冻结面刷新**：`tests/StableParity/boundary.json` 只刷新 `Utils/SuperMerger.cs` 一个 hash，
+`reference` 写明「新增 block-sum 校验 + 合法输入字节不变」，其余 12 个冻结文件 hash 未动。
+
+**证据（真跑）**：
+
+```
+dotnet run --project tests/WriteGates   -> 164 write gate checks passed.
+PASS M2: TotalBlocks smaller than what the chunks describe is refused
+PASS M2: TotalBlocks larger than what the chunks describe is refused
+PASS M2: a raw chunk whose payload is not a multiple of BlockSize is refused
+PASS M2: an image whose TotalBlocks equals its chunk accounting still merges
+PASS M2: TotalBlocks=2 with one raw 4096-byte chunk is verdict=failed (accounted 1)
+PASS M2: raw(1) + dontcare(2) + crc32(0) is verdict=verified for TotalBlocks=3
+PASS M2: an unknown chunk type is verdict=failed
+dotnet run --project tests/StableParity -> 35 stable parity checks passed（golden merge bytes 全等）
+dotnet run --project tests/SurfaceParity -> 430 surface parity checks passed.
+```
+
+> 顺手发现（未修，不入本轮范围）：`tests/WriteGates` 旧局部 helper `Sparse()` 写的是 **14 字节**
+> chunk header（`0xcac1u`+ushort+uint+uint），与它自己声明的 `ChunkHeaderSize=12` 不一致；
+> 旧断言只关心「被拒绝」，所以一直没暴露。新加的正例改用 `SparseDeclared`（12 字节 header + 真 payload）。
 
 ## 3. `oem dump-emmc` argv 列表重载
 

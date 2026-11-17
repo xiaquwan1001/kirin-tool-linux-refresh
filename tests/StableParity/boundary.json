@@ -48,7 +48,7 @@
     "sha256": "768f0c3ec23df7754011f9f9b538c538200ac6865ae4c9e62f3c9de451f92c28"
   },
   "Utils/SuperMerger.cs": {
-    "reference": "45440d47296ef4c250fc03730259dbeebb245ebc + audit-2026-11-12 safety fix: ReadStruct rejects a short read with EndOfStreamException instead of passing a truncated buffer to Marshal.PtrToStructure; merge layout and byte handling unchanged + v2.4.23 round5 M2 (audit §1.2): sparse header/chunk geometry is validated (FileHeaderSize 28, ChunkHeaderSize 12, BlockSize > 0, TotalChunks 1..what the file can hold, chunk TotalSize >= 12 and inside the file) and newTotalChunks uses checked arithmetic; the bytes produced for a valid input are unchanged (the Windows-merge golden byte test below still passes).",
-    "sha256": "7afa248b74134ca44b3c00f280aef3b5086a8dcb3b10523c6a8b00b1793bb454"
+    "reference": "45440d47296ef4c250fc03730259dbeebb245ebc + audit-2026-11-12 safety fix: ReadStruct rejects a short read with EndOfStreamException instead of passing a truncated buffer to Marshal.PtrToStructure; merge layout and byte handling unchanged + v2.4.23 round5 M2 (audit §1.2): sparse header/chunk geometry is validated (FileHeaderSize 28, ChunkHeaderSize 12, BlockSize > 0, TotalChunks 1..what the file can hold, chunk TotalSize >= 12 and inside the file) and newTotalChunks uses checked arithmetic; the bytes produced for a valid input are unchanged (the Windows-merge golden byte test below still passes). + r7-b4 M2 (§1.2 续): sparse TotalBlocks 现在是**被校验的声明**——合并前把每个 chunk 折算成块数（raw = payload / BlockSize、fill/dontcare = ChunkSize、crc32 = 0）并与 header.TotalBlocks 比对，不一致即 SparseBlockSum verdict=failed 并抛 InvalidDataException 拒绝输入（规则在新增的 Services/Verdict/SparseBlockSum.cs）。合法输入的合并字节与输出 layout 完全不变（Windows golden byte 测试仍逐字节相等），新增的只是对自相矛盾 header 的拒绝。",
+    "sha256": "20f57ae34aea12c9a56779c55c29b4d44193b5339362164ce53564494ea32372"
   }
 }

@@ -764,6 +764,80 @@ try { Directory.Delete(stubDir, true); } catch { }
             Check((DateTime.UtcNow - started).TotalSeconds < 5,
                 "M2: the refusal is immediate, not a walk over the declared chunk count (" + (DateTime.UtcNow - started).TotalSeconds.ToString("0.00") + "s)");
         }
+
+        // M2 (r7-b4, §1.2 续): the header's TotalBlocks is a claim about how many blocks the image
+        // expands to, and the chunks have to add up to it. This is the same rule libsparse applies
+        // when it reads an image back; the verdict is a pure function so it is checked both ways.
+        byte[] SparseDeclared(uint totalBlocks, uint blockSize, params (ushort Type, uint Blocks, uint TotalSize)[] chunks)
+        {
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            writer.Write(0xed26ff3au); writer.Write((ushort)1); writer.Write((ushort)0);
+            writer.Write((ushort)28); writer.Write((ushort)12); writer.Write(blockSize);
+            writer.Write(totalBlocks); writer.Write((uint)chunks.Length); writer.Write(0u);
+            foreach (var chunk in chunks)
+            {
+                writer.Write(chunk.Type); writer.Write((ushort)0); writer.Write(chunk.Blocks); writer.Write(chunk.TotalSize);
+                // Payload bytes (zeroed) so the geometry checks that run before the block-sum
+                // accounting see a file whose chunks really are inside it.
+                writer.Write(new byte[Math.Max(0, (int)chunk.TotalSize - 12)]);
+            }
+            return stream.ToArray();
+        }
+
+        var blockSumFailures = new (string Label, byte[] Bad)[]
+        {
+            ("M2: TotalBlocks smaller than what the chunks describe is refused",
+                SparseDeclared(0, 4096, ((ushort)0xcac1, 0u, 12u + 4096u))),
+            ("M2: TotalBlocks larger than what the chunks describe is refused",
+                SparseDeclared(99, 4096, ((ushort)0xcac1, 0u, 12u + 4096u))),
+            ("M2: a raw chunk whose payload is not a multiple of BlockSize is refused",
+                SparseDeclared(0, 4096, ((ushort)0xcac1, 0u, 12u + 100u))),
+        };
+        foreach ((string label, byte[] bad) in blockSumFailures)
+        {
+            string badPath = Path.Combine(spoil, "bad-blocksum");
+            File.WriteAllBytes(badPath, bad);
+            bool refused = false;
+            try { await SuperMerger.MergeSuperImages(Path.Combine(spoil, "good"), badPath, Path.Combine(spoil, "merged-blocksum")); }
+            catch (InvalidDataException) { refused = true; }
+            Check(refused, label);
+        }
+
+        // A header that adds up still merges: the refusal must not tax well-formed images. Both
+        // sides are built by SparseDeclared (12-byte chunk headers, payload present), because the
+        // older local Sparse() helper above writes 14-byte chunk headers - malformed on purpose for
+        // the geometry cases, but not something a valid image should look like.
+        string consistentA = Path.Combine(spoil, "consistent-a");
+        File.WriteAllBytes(consistentA, SparseDeclared(3, 4096,
+            ((ushort)0xcac1, 0u, 12u + 4096u), ((ushort)0xcac3, 2u, 12u), ((ushort)0xcac4, 0u, 16u)));
+        string consistentB = Path.Combine(spoil, "consistent-b");
+        File.WriteAllBytes(consistentB, SparseDeclared(2, 4096, ((ushort)0xcac1, 0u, 12u + 8192u)));
+        string consistentOut = Path.Combine(spoil, "merged-consistent");
+        await SuperMerger.MergeSuperImages(consistentA, consistentB, consistentOut);
+        Check(File.Exists(consistentOut) && new FileInfo(consistentOut).Length > 0,
+            "M2: an image whose TotalBlocks equals its chunk accounting still merges");
+
+        // The verdict itself (machine token `failed` / `verified`), device-free.
+        var tooFew = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(2, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac1, 0, 12 + 4096),
+        });
+        Check(tooFew.Token == "failed" && !tooFew.Consistent && tooFew.AccountedBlocks == 1,
+            "M2: TotalBlocks=2 with one raw 4096-byte chunk is verdict=failed (accounted 1)");
+        var addsUp = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(3, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac1, 0, 12 + 4096),
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac3, 2, 12),
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac4, 0, 16),
+        });
+        Check(addsUp.Token == "verified" && addsUp.AccountedBlocks == 3,
+            "M2: raw(1) + dontcare(2) + crc32(0) is verdict=verified for TotalBlocks=3");
+        var unknownChunk = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(0, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0x1234, 0, 12),
+        });
+        Check(unknownChunk.Token == "failed", "M2: an unknown chunk type is verdict=failed");
     }
     finally { try { Directory.Delete(spoil, true); } catch { } }
 

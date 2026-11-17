@@ -20,9 +20,11 @@
 
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Kirin_Tool.Services.Verdict;
 
 namespace Kirin_Tool.Utils
 {
@@ -66,6 +68,7 @@ namespace Kirin_Tool.Utils
                         throw new Exception($"File {Path.GetFileName(largePath)} is not a valid sparse image.");
                     ValidateHeader(hLarge, largePath, largeLen);
 
+                    var largeChunks = new List<SparseChunkFact>(hLarge.TotalChunks > 4096 ? 4096 : (int)hLarge.TotalChunks);
                     for (int i = 0; i < hLarge.TotalChunks; i++)
                     {
                         lastChunkOffset = fs.Position;
@@ -80,8 +83,14 @@ namespace Kirin_Tool.Utils
                         if (fs.Position + payload > fs.Length)
                             throw new InvalidDataException(
                                 $"Sparse chunk {i} of {Path.GetFileName(largePath)} runs past the end of the file.");
+                        largeChunks.Add(new SparseChunkFact(chunk.ChunkType, chunk.ChunkSize, chunk.TotalSize));
                         fs.Seek(payload, SeekOrigin.Current);
                     }
+
+                    // M2 (§1.2): the declared block count must equal what the chunks describe.
+                    // A header that disagrees with its own chunks describes an image that cannot
+                    // exist, and this walk is the only place that has both facts.
+                    EnforceBlockSum(largePath, hLarge, largeChunks);
                 }
 
                 using (var src = new FileStream(largePath, FileMode.Open, FileAccess.Read))
@@ -107,6 +116,7 @@ namespace Kirin_Tool.Utils
                     if (hSmall.Magic != SparseConstants.SPARSE_HEADER_MAGIC) 
                         throw new Exception($"File {Path.GetFileName(smallPath)} is not a valid sparse image.");
                     ValidateHeader(hSmall, smallPath, smallLen);
+                    EnforceBlockSum(smallPath, hSmall, ReadChunkFacts(smallPath, hSmall));
 
                     var firstChunk = ReadStruct<ChunkHeader>(reader);
                     if (firstChunk.TotalSize < SparseConstants.CHUNK_HEADER_SIZE)
@@ -149,6 +159,48 @@ namespace Kirin_Tool.Utils
             {
                 ArrayPool<byte>.Shared.Return(buffer);
             }
+        }
+
+        /// <summary>
+        /// Reads every chunk header of a sparse image (seek only — no payload is read) into the
+        /// facts the block accounting needs. Geometry errors are reported with the same wording the
+        /// merge loop uses, so a caller cannot get a weaker verdict from this pass.
+        /// </summary>
+        private static List<SparseChunkFact> ReadChunkFacts(string path, SparseHeader header)
+        {
+            string name = Path.GetFileName(path);
+            var facts = new List<SparseChunkFact>();
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+            using var reader = new BinaryReader(fs);
+            fs.Seek(header.FileHeaderSize, SeekOrigin.Begin);
+            for (int i = 0; i < header.TotalChunks; i++)
+            {
+                var chunk = ReadStruct<ChunkHeader>(reader);
+                if (chunk.TotalSize < SparseConstants.CHUNK_HEADER_SIZE)
+                    throw new InvalidDataException(
+                        $"Sparse chunk {i} of {name} declares TotalSize={chunk.TotalSize} (< 12).");
+                long payload = chunk.TotalSize - SparseConstants.CHUNK_HEADER_SIZE;
+                if (fs.Position + payload > fs.Length)
+                    throw new InvalidDataException($"Sparse chunk {i} of {name} runs past the end of the file.");
+                facts.Add(new SparseChunkFact(chunk.ChunkType, chunk.ChunkSize, chunk.TotalSize));
+                fs.Seek(payload, SeekOrigin.Current);
+            }
+            return facts;
+        }
+
+        /// <summary>
+        /// M2 (audit 2026-11-15 round5 §1.2): `TotalBlocks` is a claim about the blocks the image
+        /// expands to. Nothing compared it with the chunks, so a header whose block count disagreed
+        /// with its own chunk list was merged and could be flashed. The verdict comes from
+        /// <see cref="SparseBlockSum"/> (`verified`/`failed`); a failed one refuses the input.
+        /// </summary>
+        private static void EnforceBlockSum(string path, SparseHeader header, List<SparseChunkFact> chunks)
+        {
+            SparseBlockSumVerdict verdict = SparseBlockSum.Evaluate(header.TotalBlocks, header.BlockSize, chunks);
+            if (verdict.Consistent) return;
+
+            throw new InvalidDataException(
+                $"Sparse header of {Path.GetFileName(path)}: block-sum verdict {verdict.Token} — {verdict.Reason}.");
         }
 
         /// <summary>
