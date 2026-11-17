@@ -125,7 +125,7 @@ jobs:
           grep -q '"fastboot-found"' /tmp/doctor.json
           grep -q '"loaders-bundled"' /tmp/doctor.json
           grep -q '"fastboot-parity"' /tmp/doctor.json
-          grep -q '"parity":"unknown"' /tmp/doctor.json
+          grep -Eq '"parity":[[:space:]]*"unknown"' /tmp/doctor.json
           "$stub/fastboot" --version
 
       - name: Smoke test - stdio MCP session
