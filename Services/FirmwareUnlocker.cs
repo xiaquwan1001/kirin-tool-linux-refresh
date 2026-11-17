@@ -178,7 +178,10 @@ namespace Kirin_Tool.Services
                     return Fail(UnlockFailureKind.LocalFile, $"Unsupported CPU '{cpu}'.");
                 }
 
-                var loaderDir = options?.LoaderDirectory ?? Path.Combine(AppContext.BaseDirectory, "loaders", cpu);
+                // D-19: the default root honours KIRIN_LOADERS_DIR, and the layout
+                // (<root>/<cpu>/<stage>.ktl) is unchanged (frozen face).
+                var loaderDir = options?.LoaderDirectory
+                    ?? LoaderDirectory.ResolveFromEnvironment(null, AppContext.BaseDirectory).ChipDirectory(cpu);
                 if (!Directory.Exists(loaderDir))
                 {
                     return Fail(UnlockFailureKind.LocalFile, $"Loader directory for {cpu} not found at '{loaderDir}'");
@@ -232,11 +235,8 @@ namespace Kirin_Tool.Services
                         var currentItem = progressItems.FirstOrDefault(p => p.FileName == loaderInfo.Name);
                         if (currentItem == null) continue;
 
-                        string fileName = $"{loaderInfo.Name.ToLower()}.ktl";
-                        if (useFastFlashLoader && loaderInfo.Name == "FASTBOOT")
-                        {
-                            fileName = "fastbootf.ktl";
-                        }
+                        // The naming rule is frozen and now has one owner (D-19).
+                        string fileName = LoaderDirectory.StageFileName(loaderInfo.Name, useFastFlashLoader);
 
                         var filePath = Path.Combine(loaderDir, fileName);
                         var payload = precheck.Stages.FirstOrDefault(stage =>

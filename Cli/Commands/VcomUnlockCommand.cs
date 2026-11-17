@@ -42,7 +42,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
         new CliParam("ack-timeout", "string", "seconds to wait for each ACK (default 10, the GUI value)"),
         new CliParam("require-ack", "boolean", "fail (exit 3, verified=false) when any frame is missing its 0xAA ACK; the lenient recording behaviour is kept, so the upload is not aborted mid-transfer"),
         new CliParam("replug", "string", "cable prompt policy: skip (non-interactive default) | prompt | wait:<seconds>"),
-        new CliParam("loader-dir", "string", "directory holding the per-chip loader subdirectories (default: <program dir>/loaders)"),
+        new CliParam("loader-dir", "string", "directory holding the per-chip loader subdirectories (default: $KIRIN_LOADERS_DIR, else <program dir>/loaders; this flag wins)"),
         new CliParam("stage-only", "string", "stage subset: all | null | xloader | rest (rest never re-sends START)", Enum: new[] { "all", "null", "xloader", "rest" }, Default: "all"),
         new CliParam("port", "string", "explicit VCOM tty/COM path (skips the 12d1:3609 enumeration; bulk-only framing, no modem lines)"),
         new CliParam("use-fastflash-loader", "boolean", "upload fastbootf.ktl instead of fastboot.ktl (the GUI switch)"),
@@ -111,10 +111,11 @@ internal sealed class VcomUnlockCommand : ICliCommand
         bool dryRun = args.HasFlag("dry-run");
         bool frameLog = !args.HasFlag("no-frame-log");
 
-        string loaderBase = args.Value("loader-dir") is { Length: > 0 } loaderDirArg
-            ? Path.GetFullPath(loaderDirArg, context.WorkingDirectory)
-            : BundledLoaders.Directory;
-        string loaderDirectory = Path.Combine(loaderBase, cpu);
+        // D-19: priority --loader-dir > KIRIN_LOADERS_DIR > <program dir>/loaders, and the winner
+        // is carried along so the plan/log can say where the directory came from.
+        LoaderDirectoryResolution loaderResolution = BundledLoaders.Resolve(args.Value("loader-dir"), context.WorkingDirectory);
+        string loaderBase = loaderResolution.Root;
+        string loaderDirectory = loaderResolution.ChipDirectory(cpu);
 
         var planned = BundledLoaders.Plan(cpu, useFastFlash, loaderBase)
             .Where(stage => StageSelected(stage.Stage, stages))
@@ -134,6 +135,8 @@ internal sealed class VcomUnlockCommand : ICliCommand
         {
             cpu,
             loaderDirectory,
+            loaderDirectorySource = loaderResolution.SourceName,
+            loaderDirectorySourceValue = loaderResolution.RawValue,
             implementation = "Services/FirmwareUnlocker.UnlockFastboot + Services/VcomFlasher (invoked: this command performs the real upload)",
             requiresVcomMode = "HUAWEI USB COM 1.0 (12d1:3609)",
             ackMode = AckModeName(ackMode),
@@ -172,6 +175,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
             logger.Event("plan",
                 ("cpu", cpu),
                 ("loaderDirectory", loaderDirectory),
+                ("loaderDirectorySource", loaderResolution.SourceName),
                 ("stages", StageName(stages)),
                 ("ackMode", AckModeName(ackMode)),
                 ("replug", ReplugName(replug, replugWaitSeconds)),
@@ -199,7 +203,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
                 });
             else
             {
-                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages, plannedModemLines);
+                WritePlanText(context, cpu, loaderDirectory, planned, ackMode, replug, replugWaitSeconds, stages, plannedModemLines, loaderResolution);
                 context.Output.WriteLine();
                 context.Output.WriteLine($"gate: plan-only (exit {ExitCodes.Gated})");
                 context.Output.WriteLine("re-run with --yes (CLI) or confirm:true (MCP) to really upload the loaders.");
@@ -250,6 +254,7 @@ internal sealed class VcomUnlockCommand : ICliCommand
         logger.Event("run",
             ("cpu", cpu),
             ("loaderDirectory", loaderDirectory),
+            ("loaderDirectorySource", loaderResolution.SourceName),
             ("stages", StageName(stages)),
             ("ackMode", AckModeName(ackMode)),
             ("replug", ReplugName(replug, replugWaitSeconds)),
@@ -488,10 +493,11 @@ internal sealed class VcomUnlockCommand : ICliCommand
     private static void WritePlanText(CliContext context, string cpu, string loaderDirectory,
         IReadOnlyList<(string Stage, string File, int Address, bool PwnFlag, bool Exists)> planned,
         VcomAckMode ackMode, ReplugPolicy replug, int replugWaitSeconds, UnlockStageSelection stages,
-        ModemLineDecision modemLines)
+        ModemLineDecision modemLines, LoaderDirectoryResolution loaderResolution)
     {
         context.Output.WriteLine($"vcom unlock plan for {cpu}");
-        context.Output.WriteLine($"loader directory: {loaderDirectory}");
+        // D-19: the directory and where it came from (--loader-dir / KIRIN_LOADERS_DIR / default).
+        context.Output.WriteLine($"loader directory: {loaderDirectory}  (source: {loaderResolution.SourceName})");
         context.Output.WriteLine($"ack mode: {AckModeName(ackMode)}   replug: {ReplugName(replug, replugWaitSeconds)}   stage-only: {StageName(stages)}");
         // D-18: the modem-line path is part of the plan, with its evidence.
         context.Output.WriteLine($"modem lines: {modemLines.Describe()}");

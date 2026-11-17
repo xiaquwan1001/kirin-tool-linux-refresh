@@ -31,4 +31,5 @@ BatteryGate
 PwnJumpTable
 SocWriteRequirements
 ModemLinePolicy
+LoaderDirectory
 DloadSentinel
