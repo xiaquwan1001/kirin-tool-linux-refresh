@@ -52,9 +52,6 @@ internal sealed class VcomUnlockCommand : ICliCommand
         new CliParam("json", "boolean", "structured output"),
     };
 
-    /// <summary>Chips whose null→XLOADER handoff needs a physical cable replug (same list as the GUI).</summary>
-    private static readonly string[] ReplugAfterNullCpus = { "hisi980", "hisi810", "hisi820", "hisi985", "hisi990" };
-
     public async Task<int> ExecuteAsync(ParsedArgs args, CliContext context, CancellationToken cancellationToken)
     {
         string cpu = (args.Value("cpu") ?? string.Empty).Trim().ToLowerInvariant();
@@ -214,7 +211,9 @@ internal sealed class VcomUnlockCommand : ICliCommand
         // The null→XLOADER handoff on these chips needs the device to be unplugged from the
         // computer side; a non-interactive run cannot do that on its own.
         bool continuesPastNull = stages is UnlockStageSelection.All or UnlockStageSelection.Xloader;
-        bool needsReplug = continuesPastNull && ReplugAfterNullCpus.Contains(cpu);
+        // D-26: the replug list has one owner (Services/SocWriteRequirements.cs); the CLI no
+        // longer keeps its own copy of the GUI's list.
+        bool needsReplug = continuesPastNull && SocWriteRequirements.RequiresCableReplug(cpu);
         if (needsReplug && replug == ReplugPolicy.Skip)
         {
             context.Diag("refused: this chip's null→XLOADER handoff requires a physical cable replug; " +

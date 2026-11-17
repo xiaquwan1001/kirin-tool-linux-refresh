@@ -29,4 +29,5 @@ VerdictHonesty
 VersionMetadata
 BatteryGate
 PwnJumpTable
+SocWriteRequirements
 DloadSentinel
