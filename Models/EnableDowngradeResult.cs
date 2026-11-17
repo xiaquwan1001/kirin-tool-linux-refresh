@@ -34,7 +34,19 @@ namespace Kirin_Tool.Models
         public bool Step4Success { get; set; }
         public string Step4Output { get; set; } = "";
 
-        public bool OverallSuccess => Step1Success || Step2Success || Step3Success || Step4Success;
+        /// <summary>
+        /// D-24 (audit S21): true only when <b>every</b> step succeeded.
+        ///
+        /// This used to be <c>OverallSuccess = Step1Success || … || Step4Success</c> — "any one
+        /// version field was erased" read as "downgrade enabled", on the most irreversible path the
+        /// tool has. No caller used it (they read <see cref="SuccessfulStepsCount"/>), so it was a
+        /// dead-code trap; it is replaced by an all-steps judgement and the OR aggregate is not
+        /// offered under any other name. Asserted by <c>tests/WriteGates</c> §15.
+        /// </summary>
+        public bool AllStepsSucceeded => Step1Success && Step2Success && Step3Success && Step4Success;
+
+        /// <summary>At least one step did not succeed (the complement of <see cref="AllStepsSucceeded"/>).</summary>
+        public bool HasFailure => !AllStepsSucceeded;
 
         public bool AllStepsFailed => !Step1Success && !Step2Success && !Step3Success && !Step4Success;
 

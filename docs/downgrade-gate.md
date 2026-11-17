@@ -155,8 +155,12 @@ tests/StableParity     35 checks passed
 MCP 工具（旧 README 的「真实写入 9 / 仅规划 3」把 \`vcom_unlock\` 错列进仅规划，本次一并按注册表
 纠正为真实写入）。
 
-**未修（不在本 lane）**：BB-18 的展示性延迟（保留）、\`EnableDowngradeResult.OverallSuccess\` 的 OR
-语义（D-24，本 lane 不依赖它：调用点只用 \`SuccessfulStepsCount\`）、\`D-04\` USB Update 的成功判据。
+**已清偿**：`EnableDowngradeResult.OverallSuccess` 的 OR 语义（D-24）在 v3.1.0 删除，改成
+`AllStepsSucceeded`（ALL 语义）+ `HasFailure`；本 lane 的调用点继续只用 `SuccessfulStepsCount`，
+行为不变（见 `docs/debt-register.md` D-24 行与 `tests/WriteGates` §15）。
+
+**未修（不在本 lane）**：BB-18 的展示性延迟（保留）。`D-04` USB Update 的成功判据已在 v2.4.15
+另清偿（见 `docs/usb-update-verdict.md`）。
 
 ## 附：改动文件清单
 

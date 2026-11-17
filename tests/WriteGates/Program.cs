@@ -1247,6 +1247,59 @@ try { Directory.Delete(stubDir, true); } catch { }
         "M4: the old inline formula is gone");
 }
 
+// ---------------------------------------------------------------- 15. D-24: ALL, not ANY
+// FrpBypassResult/EnableDowngradeResult used to expose OverallSuccess = step1 || step2 || …
+// ("one erase went through" == success). No caller used it, so it was a dead-code trap: the name
+// promised a judgement and delivered an OR. It is now an all-steps judgement, and the OR aggregate
+// is not offered under any other name.
+{
+    Type frpType = typeof(Kirin_Tool.Models.FrpBypassResult);
+    Type downgradeType = typeof(Kirin_Tool.Models.EnableDowngradeResult);
+    Check(frpType.GetProperty("OverallSuccess") == null,
+        "D-24: FrpBypassResult no longer exposes the OR aggregate under the success-sounding name");
+    Check(downgradeType.GetProperty("OverallSuccess") == null,
+        "D-24: EnableDowngradeResult no longer exposes the OR aggregate either");
+    Check(frpType.GetProperty("AllStepsSucceeded") != null && frpType.GetProperty("HasFailure") != null,
+        "D-24: FrpBypassResult names the two judgements a caller can actually act on");
+    Check(downgradeType.GetProperty("AllStepsSucceeded") != null && downgradeType.GetProperty("HasFailure") != null,
+        "D-24: EnableDowngradeResult names them too");
+
+    // The decisive shape: two steps OK, one step failed.
+    var frp = new Kirin_Tool.Models.FrpBypassResult { Step1Success = true, Step2Success = true, Step3Success = false };
+    Check(!frp.AllStepsSucceeded, "D-24: two OK + one failed is NOT a success (the old OR said true)");
+    Check(frp.HasFailure, "D-24: two OK + one failed reports a failure");
+    Check(!frp.AllStepsFailed && frp.SuccessfulStepsCount == 2, "D-24: partial progress is still visible (2/3) and is not called total failure");
+
+    var frpAll = new Kirin_Tool.Models.FrpBypassResult { Step1Success = true, Step2Success = true, Step3Success = true };
+    Check(frpAll.AllStepsSucceeded && !frpAll.HasFailure, "D-24: three OK steps are a success, and only then");
+
+    var frpNone = new Kirin_Tool.Models.FrpBypassResult();
+    Check(!frpNone.AllStepsSucceeded && frpNone.AllStepsFailed && frpNone.HasFailure, "D-24: no step OK is a failure");
+
+    var downgrade = new Kirin_Tool.Models.EnableDowngradeResult
+    { Step1Success = true, Step2Success = true, Step3Success = true, Step4Success = false };
+    Check(!downgrade.AllStepsSucceeded && downgrade.HasFailure,
+        "D-24: three OK + one failed version-field erase is NOT 'downgrade enabled' (the old OR said true)");
+    Check(downgrade.SuccessfulStepsCount == 3 && !downgrade.AllStepsFailed,
+        "D-24: 3/4 is reported as partial, not as an all-failed run");
+
+    var downgradeAll = new Kirin_Tool.Models.EnableDowngradeResult
+    { Step1Success = true, Step2Success = true, Step3Success = true, Step4Success = true };
+    Check(downgradeAll.AllStepsSucceeded && !downgradeAll.HasFailure, "D-24: 4/4 OK is a success, and only then");
+
+    // Source guard: the OR form must not come back as a differently named aggregate.
+    foreach (string model in new[] { "Models/FrpBypassResult.cs", "Models/EnableDowngradeResult.cs" })
+    {
+        string text = File.ReadAllText(Path.Combine(root, model));
+        Check(!text.Contains("bool OverallSuccess", StringComparison.Ordinal),
+            "D-24: " + model + " does not reintroduce the OR property (comments may quote the removed one)");
+        Check(!text.Contains("=> Step1Success ||", StringComparison.Ordinal) && !text.Contains("|| Step2Success;", StringComparison.Ordinal),
+            "D-24: " + model + " has no step-OR aggregate in any spelling");
+        Check(text.Contains("AllStepsSucceeded => Step1Success && Step2Success", StringComparison.Ordinal),
+            "D-24: " + model + " spells the aggregate as an AND chain");
+    }
+}
+
 Console.WriteLine(checks + " write gate checks passed.");
 
 /// <summary>

@@ -51,6 +51,11 @@
   `LinuxSerialPortFinder.TryReadAttribute`（absent≠读失败）。断言：新增 `tests/CommandOutcomes`（58 条，
   纯分类器 + 临时目录，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/
   `devices-unsupported`，14 条，含 info/doctor 的 exit code 与 `device.probe`/`probeReason`）。
+- **D-24 → fixed-in-3.1.0**（S21）：`FrpBypassResult`/`EnableDowngradeResult` 的 OR 聚合
+  `OverallSuccess`（任一 step 成功即 true）被**删除**，改成 ALL 语义 `AllStepsSucceeded` + `HasFailure`；
+  名字本身是陷阱，所以不保留改名别名，部分进度继续用既有的 `SuccessfulStepsCount`/`AllStepsFailed`。
+  现有调用点只读 `SuccessfulStepsCount`，写命令/GUI 行为不变。断言：`tests/WriteGates` §15（14 条，
+  含「两步 OK + 一步失败 ⇒ 假」与反射/源码双向防回归）。
 - **冻结面**：`tests/StableParity/boundary.json` 本轮不需要刷新——清单里没有任何文件被改动
   （`MainWindow.axaml.cs`、`Services/FirmwareUnlocker.cs`、`Services/USBUpdate/*`、`Utils/Crc16.cs`、
   `Utils/SuperMerger.cs`、`UI/*`、`Security/CryptoUtil.cs`、`Services/OemInfoEditor.cs`、
@@ -185,7 +190,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | open | `Cli/Mcp/McpServer.cs:14,112` |
 | D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
 | D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | open | GUI 备份调用点见审计原文；超时分支 `Task.WhenAny(..., Task.Delay(10min))`（S34 同源） |
-| D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | open | `Models/FrpBypassResult.cs:34`；`Models/EnableDowngradeResult.cs:37` |
+| D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | **fixed-in-3.1.0** | 两条 OR 聚合被删除（不是改语义后留名——名字本身才是陷阱），换成 ALL 语义 `AllStepsSucceeded`（`&&` 链）与 `HasFailure`（补集），部分进度仍由既有的 `SuccessfulStepsCount`/`AllStepsFailed` 表达。位置 `Models/FrpBypassResult.cs:36-51`、`Models/EnableDowngradeResult.cs:36-51`；现有调用点（`Cli/Commands/DeviceWriteCommands.cs:372,801`、`Services/WriteOperations/DeviceWriteOps.cs`、`MainWindow.axaml.cs:2065`）本就只读 `SuccessfulStepsCount`，行为不变。测试 `tests/WriteGates` §15（14 条）：两步 OK 一步失败 ⇒ `AllStepsSucceeded=false, HasFailure=true`；3/4 OK 的 version-field 擦除同理；反射断言 `OverallSuccess` 属性不存在（不能悄悄回归）；源码扫描断言两份模型里没有 `=> Step1Success ||` 之类的 OR 聚合。**误判后果（已消除）**：下一个调用者会拿这个「听起来像结论」的名字去报「FRP 已绕过 / 降级已开启」，而实际只有 1/3、1/4 命令回 OKAY |
 | D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | **fixed-in-3.1.0** | 新增可区分结果类型 `Services/Verdict/ReadOutcome.cs`（`ReadOutcomeKind{Ok,Unsupported,Timeout,Failed}` + 带 reason 的 `ReadOutcome<T>` + 纯分类器 `ReadOutcomes`）；`Services/Verdict/ConnectionProbe.cs`（`fastboot devices` 纯分类 + `probe-failed/probe-timeout/probe-unsupported` 状态 token）。五个调用点：`Services/FastbootClient.cs:112-144`（`ProbeConnectionAsync`，`IsDeviceConnected` 只是它的 Ok&&true 投影）；`Cli/CommandSupport.cs:29-121`（`FastbootSession.Connection` 携带探针结论、`DeviceVars.TryReadOutcomeAsync` 区分 unsupported/超时/失败，`TryReadAsync` 保留旧签名但把非 Ok 写进诊断日志）；`Cli/Commands/ReadCommands.cs:60-83`（info/doctor 的 `probe-*` 状态 + **exit 1**，不再并进 exit 2「无设备」；`unreadable` 字段逐变量给 kind+reason）；`Utils/ProcessRunner.cs:420-475`（三层空 catch → `DiagnosticLogWriter.TryWrite` + `LastDiagnosticWrite`，全失败写一行 stderr）；`Services/UserSettings.cs:88-94,350-410`（`LastLoadOutcome`/`LastSaveOutcome`，仍改名 `.bad` 但记录异常类型/目标/回落）；`Utils/LinuxSerialPortFinder.cs:186-223`（`TryReadAttribute`：absent=Unsupported、读取抛错=Failed，不再都是 null）。测试：`tests/CommandOutcomes`（58 条，纯分类器 + 临时目录/临时 sysfs 文件，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/`devices-unsupported`，断言 info/doctor exit 1/5 与 `device.probe`/`probeReason`，14 条）。**误判后果（已消除）**：以前 fastboot 坏掉/超时会被报成「没插设备」（exit 2）或干脆静默，读者照 cable/重插排查；日志写失败、settings 被改名、sysfs 读失败都没有任何痕迹 |
 | D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |
 | D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | open | `Cli/Commands/WriteCommands.cs:711-722`；`Cli/Commands/OtaFlashRunner.cs:51-59` vs `Utils/UpdateApp.cs:229-246` |
@@ -338,7 +343,7 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 
 ## 统计（v2.4.14 基线）
 
-- 已关闭（v3.0.0 复核后）：D-01…D-17 全部 fixed；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27 关闭。
-- 仍 open：D-18…D-27 共 10 条（供货/打包/协议版本/udev 文案/GUI 隐式步骤/OR 语义/失败-不支持-超时未分/名单四份/知识重复），按危险度排序后 TOP3 = D-25（失败与不支持仍不可区分）、D-23（GUI 隐式步骤）、D-20（打包缺 loaders）。
+- 已关闭（v3.1.0 后）：D-01…D-17 全部 fixed；**D-24、D-25 → fixed-in-3.1.0**；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27 关闭。
+- 仍 open：D-18…D-23、D-26、D-27 共 8 条（供货/打包/协议版本/udev 文案/GUI 隐式步骤/名单四份/知识重复），按危险度排序后 TOP3 = D-23（GUI 隐式步骤）、D-20（打包缺 loaders）、D-19（loader 目录约定）。
 - wontfix：4 组（B 类 2 条 + 协议常量 13 条 + 纯 UI handler 17 个）。
 - unknown：审计报告中未逐行复核的剩余条目（见附录 E），数量取决于复核粒度，不在此虚报。
