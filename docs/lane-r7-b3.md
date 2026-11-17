@@ -87,9 +87,52 @@ $ dotnet run --project tests/VcomUnlockCli -c Release  rc=0  98 VCOM unlock pari
 冻结面：`Services/VcomFlasher.cs` 属 boundary.json，同 commit 刷新哈希并写明「仅字面量来源替换，
 wire/时序/重试未变」。`Services/FirmwareUnlocker.cs` 未改（对齐由测试断言，而不是改表）。
 
-## 3. D-14（BB-13 / BB-16 GUI 侧）dload 临时目录 + sentinel
+## 3. D-14（BB-13 / BB-16 GUI 侧）dload 临时目录 + sentinel — commit `e9155cc`
 
-状态: 待做
+状态: **完成**
+
+### 判据（旧行为）
+`MainWindow.axaml.cs` 用 CWD 相对字面量 `"dload"` 构造 `USBUpdateFlasherService` 与
+`SoftwareTestpointService`；两者开跑前都 `OpLog.CleanDirectory(dload)` → `Directory.Delete(d, true)`。
+用户从任意目录启动 GUI 时，CWD 下任何同名目录会被递归删除，且删除前不看内容。CLI 侧
+（`UsbTestpointCommand`）早已改用 `PrivateWorkDirectory.Create("kirin-tool-dload")`（随机名 + 0700）。
+
+### 落地
+| 文件 | 改动 |
+|---|---|
+| `MainWindow.axaml.cs` | 两个服务共享一个 `PrivateWorkDirectory.Create("kirin-tool-dload")`；`"dload"` 字面量删除（与 CLI 同一做法） |
+| `Services/USBUpdate/DloadSentinel.cs`（新） | 纯函数 `Evaluate(directory, directoryExists, entries)` + `EvaluateDirectory`。规则：空目录可删；否则**每个**条目必须是本工作流写的（`list.txt`/`unlockcode`/`*_BAK.img` + 经 `PartitionNames` 白名单的 `*.img`/`*.img.header`）**且**至少存在一个工作流标记。文件系统根 / 用户 home / 路径不可解析 / 不存在 / 列举失败 → 一律拒绝（fail-closed） |
+| `Services/USBUpdate/DloadDirectoryCleaner.cs`（新） | `Clean()`：先 sentinel，通过才 `OpLog.CleanDirectory`；拒绝时写 op 证据（verdict `refused:sentinel`）并**不删任何东西** |
+| `SoftwareTestpointService.cs`（2 处）、`USBUpdateFlasherService.cs`（1 处） | 改走 cleaner；`OpLog.CleanDirectory` 现在全树只有一个调用点 |
+| `tests/DloadSentinel`（新套件 38 checks） | 见下 |
+
+### 断言
+- 纯规则：空目录可删；8 个「本工作流文件」组合可删；混入 1 个外来文件即拒绝且回执点名该文件；
+  只有 `*.img` 而无标记文件 → 拒绝（「名字看起来无害」不算识别）；`/`、home、null、空串、
+  不存在的目录全部拒绝；`IsOwnEntry` 对 `.git`/`list.txt.bak`/`../evil.img`/`null` 为假。
+- 真实临时目录（非设备操作）：造一个「`list.txt` + `XLOADER.img` + `family-photos.jpg`」目录，
+  `DloadDirectoryCleaner.Clean` 拒绝后**目录与外来文件仍在**（这就是债务本身的回归测试）；
+  子目录也算外来条目；把外来内容清掉后同一目录变可删并确实被删。
+- 源码扫描（防回退）：GUI 代码行里不再有 `"dload"` 字面量、改为
+  `PrivateWorkDirectory.Create("kirin-tool-dload")` 且只创建一次（两服务共享）；
+  `SoftwareTestpointService`/`USBUpdateFlasherService` 里已无 `Directory.Delete(`；
+  `OpLog.CleanDirectory(` 在 gate 之外无任何调用者。
+
+### 证据
+```
+$ dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false   -> 3 警告（既有）/ 0 个错误
+$ dotnet run --project tests/DloadSentinel -c Release   rc=0  DloadSentinel ALL PASS (38 checks)
+$ dotnet run --project tests/StableParity -c Release    rc=0  35 stable parity checks passed
+$ dotnet run --project tests/UsbUpdateUi -c Release     rc=0  PASS ...
+$ dotnet run --project tests/UsbUpdateVerdict -c Release rc=0 all 39 USB-update verdict checks passed
+$ dotnet run --project tests/OpLogging -c Release       rc=0  168 operation-logging checks passed
+$ dotnet run --project tests/GuiQol -c Release          rc=0  8 GUI QoL checks passed
+```
+冻结面：`MainWindow.axaml.cs` 与 `Services/USBUpdate/SoftwareTestpointService.cs` 都在
+boundary.json，同 commit 刷新哈希并写明「行为保持型：提取/传输/打补丁命令、wire 字节、时序、
+重试未变，仅删除点的前置校验」。**一处有意保留的行为差异**：旧行为是「删除失败也继续」，
+现在是「拒绝删除并继续 + 记录证据」，调用方控制流一致（提取仍使用该目录）。
+注：`USBUpdateFlasherService.cs` 不在 boundary 清单内。
 
 ## 4. 全量验证
 
