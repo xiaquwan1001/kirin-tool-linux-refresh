@@ -8,34 +8,45 @@
 没有证据的条目不写「已修」——不确定的一律标 `unknown` 并写清缺什么证据。
 
 
-## v2.4.15 变更（2026-11-13）
+## v3.1.0 变更（主机侧，无设备）
 
-- **D-01 → fixed-in-2.4.15**：`oeminfo` 拆成 `oeminfo-convert`（PlanOnly，只在本机构造镜像）与
-  `oeminfo-flash`（Write + 红线 + 不可逆 + 手输确认串）。GUI 的 `HandleOemInfoFlash` 先过
-  `RequestGuiApprovalAsync`，再走 `DeviceWriteOps.FlashOemInfoAsync(ticket, path)`；CLI/MCP 同名
-  能力同步。注册表不再谎报 PlanOnly，`SurfaceParity` 的 H1/H3/H7 会拦住任何回退。
-- **D-02 → fixed-in-2.4.15**：`WriteResult` 只接受调用点构造的 `WriteReport`（Applied / Partial /
-  Failed / Unconfirmed），没有默认 `true`。9 个写命令 + `flash-ota`/`flash-xml` 的 JSON 全部取设备
-  真实结论；`tests/WriteGates` 用桩断言失败时 `applied=false, gate=failed`。
-- **D-03 → fixed-in-2.4.15**：CLI/MCP 的 `write-sn` 写后读回 `nve:SN`，用 `NveWriteCheck.Compare`
-  出 verdict（`verified / reason / readBack`），只有读回一致才 exit 0。
-- **D-13 → fixed-in-2.4.15**：`downgrade-enable` 拆成 `downgrade-enable`（PlanOnly，只打印 4 条计划、
-  exit 4）与 `downgrade-erase`（Write + 红线 + 不可逆 + 手输确认串）。GUI `HandleEnableDowngrade` 先过
-  `RequestGuiApprovalAsync`，再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`（op 日志
-  `downgrade.erase`）；CLI/MCP 同名能力同步，结论走 `WriteReport`（0 条 OKAY = `applied=false,
-  gate=failed`）。设备侧仍是 4 条 `oem oeminfoerase-*ver`，顺序与时序未变（[downgrade-gate.md](downgrade-gate.md)）。
-- **日志已合流（v2.4.15）**：一次操作 = `sessions/<ts>-<pid>-<op>/`（`session.jsonl` + `vcom-trace.txt`
-  + `summary.json`），新增只读 `logs list|show|path`；旧 `{vcom,fastboot,flash}/*.jsonl` 只读兼容。
-- **D-04 → fixed-in-2.4.15**：USB Update 通道改出三态结论（`verified / partial / failed`），
-  握手未建立、缺 `.img`/`.img.header`/0 字节、读到 0 字节早退、空 `else` 全部变成
-  `degraded:`/`skipped:`/`missing:` 事件；`FlashPartitions` 返回 `UsbUpdateVerdict`，GUI/CLI 按三态显示，
-  `WriteReport` 映射 Verified→Applied、Partial→Partial(exit 3)、Failed→Failed(exit 3)。协议命令/时序未变
-  （[usb-update-verdict.md](usb-update-verdict.md)，`tests/UsbUpdateVerdict`）。
-- **D-13 → fixed-in-2.4.15**：`downgrade-enable` 拆出 `downgrade-erase`（Write+红线+不可逆），
-  GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
-- **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
+本轮只做**判据/可观测性**清偿（wire 命令、时序、重试次数不变）：
 
-## v3.1.0 变更（2026-11-18，主机侧，无设备）
+- **D-21 → fixed-in-3.1.0**（P21）：MCP 的 `initialize` 不再回显固定版本。
+  `Cli/Mcp/McpProtocol.cs` 是版本常量的唯一出处（`LatestVersion` + `SupportedVersions` + `Negotiate`），
+  支持集内回显（`outcome=echoed`）、不支持回落本机支持的最高版本并在 result 的 `protocolNegotiation`
+  里给出 `requested/returned/outcome/supported/detail`，同时 stderr 打 `protocol negotiation mismatch:`；
+  `McpServer.Initialize` 只调用它（`Cli/Mcp/McpServer.cs`）。断言 `tests/McpProtocol`（34 条，含
+  `Cli/**/*.cs` 只允许一处版本字面量的源码扫描）。
+- **D-27 → fixed-in-3.1.0**（H49/H74/S42/S43）：三份重复知识各合成一份实现，语义取更权威的一方、行为不变：
+  - UPDATE.APP 条目标记 `55 AA 5A A5` → `Utils/UpdateAppFormat.cs`（`IsHeaderMagic`），
+    `Utils/UpdateApp.cs`（严格解包）与 `Services/USBUpdate/USBUpdateApp.cs`（USB Update 解包，两处）都改调它；
+  - 条目名别名表 → `Utils/UpdateAppFormat.PartitionAliases` + `PartitionName`（解析器语义：空白→`UNKNOWN`）
+    与 `LoaderPartitionName`（计划器语义：未映射名原样小写返回），`Utils/UpdateApp.GetPartitionName` 与
+    `Cli/Commands/OtaFlashRunner` 的私有 `NameAliases` 全部改为调用同一张表；
+  - `OEM_INFO`/0x400 版本探测 → `Services/OemInfoEditor.DetectVersion(byte[])`（实例 `DetectedVersion` 同一函数），
+    `Cli/Commands/WriteCommands.TryDetectOemInfoVersion` 只剩「读文件 + 调用」，不再自己扫块。
+  断言 `tests/KnowledgeDedup`（44 条：旧规则冻结快照、别名/标记/探测语义、以及「只有一份实现」的源码扫描 +
+  「调用点真的调用它」的源码断言，防止扫描空转）。
+- **D-23 → fixed-in-3.1.0**（BB-14/BB-25/BB-29/S34）：GUI 三处隐式步骤变成显式结论：
+  - (a) 写前备份从「恒开且不可见」变成显式选项 `PreOpBackupCheckBox`（Full OTA 面板）+ `UserSettings.PreOpBackup`
+    （默认仍是 **on**，旧 settings.json 无该键时也是 on）。关掉时进度窗给出 `pre-op-backup:disabled-by-user` 提示、
+    `ProcessRunner` 诊断行和会话记录，四条写路径共用 `Services/Verdict/PreOpBackupChoice.cs` 的同一判定；
+    关闭后 `RunPreOpBackupAsync` 在任何设备访问前返回 `PreOpBackupResult.Skipped`（`Attempted=false, Error=disabled`）。
+  - (b) 结论不再只活在一个会被关掉的进度窗里：`Services/Verdict/OperationConclusionRecord.cs` 把
+    `verified/partial/failed/cancelled/timed-out/skipped` 连同原文写进**既有** `sessions/` 会话
+    （`phase=result, step=gui.conclusion, verdictSource=gui:<outcome>`），`logs list|show` 可回顾；GUI 四条写路径的
+    收尾统一走 `CompleteGuiOperation(...)`。日志目录不可写时只丢记录、不影响刷写（catch→null）。
+  - (c) USB Update 新红线分区的二次确认从 `bool` 变三态 `RedlineDeltaOutcome`（`Services/Verdict/RedlineDeltaVerdict.cs`）：
+    `Task.WhenAny` 落到超时臂即 `timed-out`（不是 `declined`），结论文案明确「CANCELLED BY TIMEOUT … NOT a user refusal」
+    并带 `redline-delta:timed-out` token，同时按 `OperationOutcome.TimedOut` 进会话记录；10 分钟上界未变。
+  断言 `tests/GuiQol` D-23a/b/c 三段（headless：勾选框默认勾选、取消勾选后持久化 + 警告可见 + 备份返回 Skipped；
+  会话行内容与 `logs list` 可见性；三态映射/文案互斥 + `MainWindow.axaml.cs` 源码确认漏斗真的在用）。
+  `tests/StableParity/boundary.json` 的 `MainWindow.axaml.cs` hash 已刷新，`reference` 写明理由（wire 命令/时序/重试未变）。
+- 验证：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 全量 rc=0。
+
+
+### L1 lane 追加（D-25 / D-24）
 
 本轮只做「失败 / 不支持 / 超时」与「聚合语义」这两类判据收紧：wire 命令、时序、重试与 GUI 行为都不变，
 两条都按仓库习惯抽成纯函数（注入式读取）并落可断言测试。
@@ -63,6 +74,33 @@
 - 验证口径：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；
   `tests/suites.txt` 全量 PASS；**未执行任何 adb/fastboot**（测试里的 fastboot 全是 stub；
   本轮没有真机动作）。
+
+## v2.4.15 变更（2026-11-13）
+
+- **D-01 → fixed-in-2.4.15**：`oeminfo` 拆成 `oeminfo-convert`（PlanOnly，只在本机构造镜像）与
+  `oeminfo-flash`（Write + 红线 + 不可逆 + 手输确认串）。GUI 的 `HandleOemInfoFlash` 先过
+  `RequestGuiApprovalAsync`，再走 `DeviceWriteOps.FlashOemInfoAsync(ticket, path)`；CLI/MCP 同名
+  能力同步。注册表不再谎报 PlanOnly，`SurfaceParity` 的 H1/H3/H7 会拦住任何回退。
+- **D-02 → fixed-in-2.4.15**：`WriteResult` 只接受调用点构造的 `WriteReport`（Applied / Partial /
+  Failed / Unconfirmed），没有默认 `true`。9 个写命令 + `flash-ota`/`flash-xml` 的 JSON 全部取设备
+  真实结论；`tests/WriteGates` 用桩断言失败时 `applied=false, gate=failed`。
+- **D-03 → fixed-in-2.4.15**：CLI/MCP 的 `write-sn` 写后读回 `nve:SN`，用 `NveWriteCheck.Compare`
+  出 verdict（`verified / reason / readBack`），只有读回一致才 exit 0。
+- **D-13 → fixed-in-2.4.15**：`downgrade-enable` 拆成 `downgrade-enable`（PlanOnly，只打印 4 条计划、
+  exit 4）与 `downgrade-erase`（Write + 红线 + 不可逆 + 手输确认串）。GUI `HandleEnableDowngrade` 先过
+  `RequestGuiApprovalAsync`，再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`（op 日志
+  `downgrade.erase`）；CLI/MCP 同名能力同步，结论走 `WriteReport`（0 条 OKAY = `applied=false,
+  gate=failed`）。设备侧仍是 4 条 `oem oeminfoerase-*ver`，顺序与时序未变（[downgrade-gate.md](downgrade-gate.md)）。
+- **日志已合流（v2.4.15）**：一次操作 = `sessions/<ts>-<pid>-<op>/`（`session.jsonl` + `vcom-trace.txt`
+  + `summary.json`），新增只读 `logs list|show|path`；旧 `{vcom,fastboot,flash}/*.jsonl` 只读兼容。
+- **D-04 → fixed-in-2.4.15**：USB Update 通道改出三态结论（`verified / partial / failed`），
+  握手未建立、缺 `.img`/`.img.header`/0 字节、读到 0 字节早退、空 `else` 全部变成
+  `degraded:`/`skipped:`/`missing:` 事件；`FlashPartitions` 返回 `UsbUpdateVerdict`，GUI/CLI 按三态显示，
+  `WriteReport` 映射 Verified→Applied、Partial→Partial(exit 3)、Failed→Failed(exit 3)。协议命令/时序未变
+  （[usb-update-verdict.md](usb-update-verdict.md)，`tests/UsbUpdateVerdict`）。
+- **D-13 → fixed-in-2.4.15**：`downgrade-enable` 拆出 `downgrade-erase`（Write+红线+不可逆），
+  GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
+- **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
 
 ## v3.0.0 变更（2026-11-17，主机侧，无设备）
 
@@ -187,13 +225,13 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-18 | P02 / H15 | Linux 自动探测仍按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR（已有 `--port`/`BulkOnly` 逃逸，默认路径未改成能力探测） | open | `Services/VcomFlasher.cs:117-122` |
 | D-19 | H06 / H50 / H51 | loader 目录仍是 `<base>/loaders/<cpu>`：CLI 只有 `--loader-dir` 参数，没有 `KIRIN_LOADERS_DIR`；命名仍是 `<stage>.ktl`/`fastbootf.ktl` | open | `Services/FirmwareUnlocker.cs:89,178`；`Cli/CommandSupport.cs:195-229` |
 | D-20 | P15 | `packaging/publish.sh` 不产出 `loaders/`，但 deb/AppRun 假定它存在 → 打包产物里 VCOM 解锁会报 `Loader directory for <cpu> not found` | open | `packaging/build-deb.sh:5`、`packaging/AppRun:3`（注释假定），`packaging/publish.sh` 内无 `loaders` 拷贝 |
-| D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | open | `Cli/Mcp/McpServer.cs:14,112` |
+| D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | **fixed-in-3.1.0** | `Cli/Mcp/McpProtocol.cs:36-95`（版本常量唯一出处 + `Negotiate`：echoed/fallback/defaulted）、`Cli/Mcp/McpServer.cs:112-160`（`Initialize(parameters, log)` 协商 + `protocolNegotiation` 字段 + stderr 失配告警）；`tests/McpProtocol` 34 条（含「版本字面量只允许一处」源码扫描） |
 | D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
-| D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | open | GUI 备份调用点见审计原文；超时分支 `Task.WhenAny(..., Task.Delay(10min))`（S34 同源） |
+| D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | **fixed-in-3.1.0**（a/b/c；「路径过长只 warn」仍是 warn，未改） | (a) `Services/Verdict/PreOpBackupChoice.cs` + `MainWindow.axaml.cs`（`HookPreOpBackupOption`/`RunPreOpBackupAsync` 前置判定）+ `MainWindow.axaml` 勾选框 + `Services/UserSettings.cs`（`pre_op_backup`，默认 true）；(b) `Services/Verdict/OperationConclusionRecord.cs` + `MainWindow.axaml.cs` `CompleteGuiOperation`（XML/Full OTA/USB Update/rescue 四处收尾）；(c) `Services/Verdict/RedlineDeltaVerdict.cs`（`FromAnswer`/`Describe`，`Timeout=10min`）+ `ConfirmRedlineDeltaOnBackground`。`tests/GuiQol` D-23a/b/c 共 30 条断言（headless + 会话文件 + 源码扫描） |
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | **fixed-in-3.1.0** | 两条 OR 聚合被删除（不是改语义后留名——名字本身才是陷阱），换成 ALL 语义 `AllStepsSucceeded`（`&&` 链）与 `HasFailure`（补集），部分进度仍由既有的 `SuccessfulStepsCount`/`AllStepsFailed` 表达。位置 `Models/FrpBypassResult.cs:36-51`、`Models/EnableDowngradeResult.cs:36-51`；现有调用点（`Cli/Commands/DeviceWriteCommands.cs:372,801`、`Services/WriteOperations/DeviceWriteOps.cs`、`MainWindow.axaml.cs:2065`）本就只读 `SuccessfulStepsCount`，行为不变。测试 `tests/WriteGates` §15（14 条）：两步 OK 一步失败 ⇒ `AllStepsSucceeded=false, HasFailure=true`；3/4 OK 的 version-field 擦除同理；反射断言 `OverallSuccess` 属性不存在（不能悄悄回归）；源码扫描断言两份模型里没有 `=> Step1Success ||` 之类的 OR 聚合。**误判后果（已消除）**：下一个调用者会拿这个「听起来像结论」的名字去报「FRP 已绕过 / 降级已开启」，而实际只有 1/3、1/4 命令回 OKAY |
 | D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | **fixed-in-3.1.0** | 新增可区分结果类型 `Services/Verdict/ReadOutcome.cs`（`ReadOutcomeKind{Ok,Unsupported,Timeout,Failed}` + 带 reason 的 `ReadOutcome<T>` + 纯分类器 `ReadOutcomes`）；`Services/Verdict/ConnectionProbe.cs`（`fastboot devices` 纯分类 + `probe-failed/probe-timeout/probe-unsupported` 状态 token）。五个调用点：`Services/FastbootClient.cs:112-144`（`ProbeConnectionAsync`，`IsDeviceConnected` 只是它的 Ok&&true 投影）；`Cli/CommandSupport.cs:29-121`（`FastbootSession.Connection` 携带探针结论、`DeviceVars.TryReadOutcomeAsync` 区分 unsupported/超时/失败，`TryReadAsync` 保留旧签名但把非 Ok 写进诊断日志）；`Cli/Commands/ReadCommands.cs:60-83`（info/doctor 的 `probe-*` 状态 + **exit 1**，不再并进 exit 2「无设备」；`unreadable` 字段逐变量给 kind+reason）；`Utils/ProcessRunner.cs:420-475`（三层空 catch → `DiagnosticLogWriter.TryWrite` + `LastDiagnosticWrite`，全失败写一行 stderr）；`Services/UserSettings.cs:88-94,350-410`（`LastLoadOutcome`/`LastSaveOutcome`，仍改名 `.bad` 但记录异常类型/目标/回落）；`Utils/LinuxSerialPortFinder.cs:186-223`（`TryReadAttribute`：absent=Unsupported、读取抛错=Failed，不再都是 null）。测试：`tests/CommandOutcomes`（58 条，纯分类器 + 临时目录/临时 sysfs 文件，无 adb/fastboot）+ `tests/WriteGates` §14（stub fastboot 的 `devices-error`/`devices-unsupported`，断言 info/doctor exit 1/5 与 `device.probe`/`probeReason`，14 条）。**误判后果（已消除）**：以前 fastboot 坏掉/超时会被报成「没插设备」（exit 2）或干脆静默，读者照 cable/重插排查；日志写失败、settings 被改名、sysfs 读失败都没有任何痕迹 |
 | D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |
-| D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | open | `Cli/Commands/WriteCommands.cs:711-722`；`Cli/Commands/OtaFlashRunner.cs:51-59` vs `Utils/UpdateApp.cs:229-246` |
+| D-27 | H49 / H74 / S42 / S43 | 知识重复：`OEM_INFO`/0x400 版本探测、UPDATE.APP 别名表、magic 扫描各有第二份实现 | **fixed-in-3.1.0** | 单一实现：`Utils/UpdateAppFormat.cs`（`IsHeaderMagic` + `PartitionAliases` + `PartitionName`/`LoaderPartitionName`）；`Services/OemInfoEditor.DetectVersion`（`Services/OemInfoEditor.cs`）。调用点：`Utils/UpdateApp.cs`（标记 + 名字）、`Services/USBUpdate/USBUpdateApp.cs`（标记 ×2）、`Cli/Commands/OtaFlashRunner.cs`（名字，私有表已删）、`Cli/Commands/WriteCommands.cs`（探测）。`tests/KnowledgeDedup` 44 条（含源码扫描「只有一份实现」+「调用点真的调用」） |
 
 ### 2.3 已声明 / 有意不修（wontfix）
 

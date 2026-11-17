@@ -42,6 +42,10 @@ public sealed class UserSettingsData
     [JsonPropertyName("oem_info_file")] public string? OemInfoFile { get; set; }
     [JsonPropertyName("device_model")] public string? DeviceModel { get; set; }
     [JsonPropertyName("vendor")] public string? Vendor { get; set; }
+
+    // D-23(a) / audit BB-14: the pre-op backup is a visible option. The initializer keeps the
+    // historical behaviour for an existing settings.json that has no such key: it stays ON.
+    [JsonPropertyName("pre_op_backup")] public bool PreOpBackup { get; set; } = true;
 }
 
 /// <summary>
@@ -208,6 +212,17 @@ public static class UserSettings
     public static string? OemInfoFile { get => Data.OemInfoFile; set => Update(d => d.OemInfoFile = Normalize(value)); }
     public static string? DeviceModel { get => Data.DeviceModel; set => Update(d => d.DeviceModel = Normalize(value)); }
     public static string? Vendor { get => Data.Vendor; set => Update(d => d.Vendor = Normalize(value)); }
+
+    /// <summary>
+    /// D-23(a) / audit BB-14: whether the GUI dumps the target partitions before a write.
+    /// Default on (the value every build before this one behaved with); off is allowed but
+    /// announced by <see cref="Verdict.PreOpBackupChoice"/>.
+    /// </summary>
+    public static bool PreOpBackup
+    {
+        get => Data.PreOpBackup;
+        set => Update(d => d.PreOpBackup = value);
+    }
 
     /// <summary>Maps the stored theme key to an Avalonia theme variant.</summary>
     public static ThemeVariant ResolveThemeVariant(string? theme) => NormalizeTheme(theme) switch

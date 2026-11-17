@@ -11,8 +11,6 @@ namespace Kirin_Tool.Cli.Mcp;
 /// </summary>
 internal static class McpServer
 {
-    private const string ProtocolVersion = "2024-11-05";
-
     private static readonly JsonSerializerOptions CompactJson = new()
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -24,7 +22,7 @@ internal static class McpServer
         // the running GUI (docs/approval-gate.md §3.3). Fail-closed when no GUI is listening.
         Services.Approval.ApprovalGates.Install(new Services.Approval.McpApprovalGate(new Services.Approval.SocketGuiApprovalBridge()));
 
-        log.WriteLine($"[mcp] {ToolInfo.Name} {ToolInfo.Version} stdio JSON-RPC (newline-delimited); protocol {ProtocolVersion}");
+        log.WriteLine($"[mcp] {ToolInfo.Name} {ToolInfo.Version} stdio JSON-RPC (newline-delimited); supports protocol {string.Join(", ", McpProtocol.SupportedVersions)}, latest {McpProtocol.LatestVersion}");
         log.WriteLine("[mcp] tools: " + string.Join(", ", CliRunner.Commands.Select(command => command.McpName)));
 
         string? line;
@@ -66,7 +64,7 @@ internal static class McpServer
                 switch (method)
                 {
                     case "initialize":
-                        if (!isNotification) await WriteAsync(output, ResultResponse(id!, Initialize()));
+                        if (!isNotification) await WriteAsync(output, ResultResponse(id!, Initialize(parameters, log)));
                         break;
                     case "notifications/initialized":
                     case "initialized":
@@ -107,20 +105,56 @@ internal static class McpServer
         return ExitCodes.Ok;
     }
 
-    private static JsonObject Initialize() => new()
+    /// <summary>
+    /// D-21: the revision comes from <see cref="McpProtocol.Negotiate(string?)"/>, which echoes a
+    /// supported client revision and falls back to the newest one this server implements. A
+    /// fallback is never silent: it is logged on stderr and reported inside the result, so a
+    /// client that cannot speak the returned revision fails loudly instead of losing the tools.
+    /// </summary>
+    private static JsonObject Initialize(JsonObject? parameters, TextWriter log)
     {
-        ["protocolVersion"] = ProtocolVersion,
-        ["capabilities"] = new JsonObject
+        string? requested = ReadRequestedVersion(parameters);
+        McpProtocol.Negotiation negotiation = McpProtocol.Negotiate(requested);
+        if (negotiation.IsExplicitMismatch)
+            log.WriteLine("[mcp] protocol negotiation mismatch: " + negotiation.Describe());
+
+        var result = new JsonObject
+        {
+            ["protocolVersion"] = negotiation.Version,
+            // Non-standard, additive field: a mismatching client can see *why* it got another
+            // revision instead of silently dropping the session.
+            ["protocolNegotiation"] = new JsonObject
+            {
+                ["requested"] = negotiation.Requested,
+                ["returned"] = negotiation.Version,
+                ["outcome"] = negotiation.Outcome,
+                ["supported"] = new JsonArray(McpProtocol.SupportedVersions.Select(version => (JsonNode?)JsonValue.Create(version)).ToArray()),
+                ["detail"] = negotiation.Describe(),
+            },
+        };
+
+        result["capabilities"] = new JsonObject
         {
             ["tools"] = new JsonObject { ["listChanged"] = false },
-        },
-        ["serverInfo"] = new JsonObject
+        };
+        result["serverInfo"] = new JsonObject
         {
             ["name"] = "kirin-tool",
             ["version"] = ToolInfo.Version,
-        },
-        ["instructions"] = BuildInstructions(),
-    };
+        };
+        result["instructions"] = BuildInstructions();
+        return result;
+    }
+
+    /// <summary>
+    /// Reads <c>params.protocolVersion</c> without trusting its JSON type: a non-string value is
+    /// "no revision requested" rather than an internal error (the client still gets an answer).
+    /// </summary>
+    private static string? ReadRequestedVersion(JsonObject? parameters)
+    {
+        if (parameters?["protocolVersion"] is not JsonValue value) return null;
+        return value.TryGetValue(out string? version) ? version : null;
+    }
 
     private static string BuildInstructions()
     {

@@ -708,17 +708,16 @@ internal sealed class OemInfoCommand : GatedWriteCommand
         return new WritePlan(details, lines);
     }
 
+    /// <summary>
+    /// D-27 (H49/S42): the OEMINFO probe itself lives in <see cref="Services.OemInfoEditor.DetectVersion(byte[])"/>
+    /// (one magic, one 0x400 block step, one version offset). Only the file read stays here: an
+    /// unreadable image is "no version detected" for a plan, never a failure.
+    /// </summary>
     private static int? TryDetectOemInfoVersion(string path)
     {
         try
         {
-            byte[] data = File.ReadAllBytes(path);
-            byte[] magic = Encoding.ASCII.GetBytes("OEM_INFO");
-            for (int offset = 0; offset + 12 <= data.Length; offset += 0x400)
-            {
-                if (data.AsSpan(offset, magic.Length).SequenceEqual(magic))
-                    return BitConverter.ToInt32(data, offset + 8);
-            }
+            return Services.OemInfoEditor.DetectVersion(File.ReadAllBytes(path));
         }
         catch (Exception)
         {

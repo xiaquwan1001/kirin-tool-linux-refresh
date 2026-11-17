@@ -31,3 +31,4 @@ VersionMetadata
 BatteryGate
 PwnJumpTable
 DloadSentinel
+KnowledgeDedup

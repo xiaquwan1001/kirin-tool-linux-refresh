@@ -700,6 +700,23 @@
                                            IsEnabled="{Binding PreloadUpdateFile.HasFile, Mode=OneWay}" Symbol="Delete16"/>
                                         </Grid>
 
+                                    <!-- D-23(a) / audit BB-14: the write-before backup used to be an
+                                         invisible, unconditional step. It stays on by default, but the
+                                         user can now see it and turn it off; turning it off is announced
+                                         both on screen and in the operation log. -->
+                                    <CheckBox x:Name="PreOpBackupCheckBox"
+                                              Content="Create a pre-op backup of the target partitions before writing (recommended)"
+                                              IsChecked="True"
+                                              FontSize="12"
+                                              Margin="0,16,0,0"/>
+                                    <TextBlock x:Name="PreOpBackupDisabledNotice"
+                                               IsVisible="False"
+                                               TextWrapping="Wrap"
+                                               FontSize="12"
+                                               Foreground="#C46A00"
+                                               Margin="0,4,0,0"
+                                               Text="Pre-op backup is OFF: a failed redline partition cannot be restored from a backup. This choice is recorded in the operation log."/>
+
                                     <Border Background="{DynamicResource AppSubtleBrush}"
                                         CornerRadius="8" 
                                         Padding="16" 

@@ -82,6 +82,11 @@ try
         Req(5, new Dictionary<string, object> { ["name"] = "flash_ota", ["arguments"] = new Dictionary<string, object> { ["files"] = cleanApp } }),
         Req(6, new Dictionary<string, object> { ["name"] = "flash_ota", ["arguments"] = new Dictionary<string, object> { ["files"] = redlineApp, ["confirm"] = true } }),
         Req(7, new Dictionary<string, object> { ["name"] = "info", ["arguments"] = new Dictionary<string, object>() }),
+        // D-21: protocol revision negotiation.
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"initialize\",\"params\":{}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{\"protocolVersion\":42}}",
     };
 
     var psi = new ProcessStartInfo(cli.EndsWith(".dll", StringComparison.Ordinal) ? "dotnet" : cli)
@@ -170,6 +175,73 @@ try
         Check(result.GetProperty("content")[0].GetProperty("text").GetString()!
                 .Contains("system-fastboot-fallback", StringComparison.Ordinal),
             "the MCP text content carries the same token (clients that only read text are not blind)");
+    }
+
+    // (h) D-21: a revision this server implements is echoed, verbatim.
+    {
+        JsonElement result = R(8).GetProperty("result");
+        Check(result.GetProperty("protocolVersion").GetString() == "2024-11-05",
+            "initialize echoes the supported client revision 2024-11-05");
+        JsonElement negotiation = result.GetProperty("protocolNegotiation");
+        Check(negotiation.GetProperty("outcome").GetString() == "echoed", "supported revision: outcome=echoed");
+        Check(negotiation.GetProperty("requested").GetString() == "2024-11-05", "supported revision: requested echoed");
+        Check(negotiation.GetProperty("returned").GetString() == result.GetProperty("protocolVersion").GetString(),
+            "negotiation.returned equals the protocolVersion the client must speak");
+        Check(negotiation.GetProperty("supported").EnumerateArray().Any(v => v.GetString() == "2024-11-05"),
+            "negotiation lists the supported revision set");
+    }
+
+    // (i) D-21: an unknown (here: newer) revision falls back to the newest supported one, and the
+    // mismatch is visible in the result *and* on stderr - never a silent different version.
+    {
+        JsonElement result = R(9).GetProperty("result");
+        Check(result.GetProperty("protocolVersion").GetString() == "2024-11-05",
+            "initialize with an unknown revision falls back to 2024-11-05");
+        JsonElement negotiation = result.GetProperty("protocolNegotiation");
+        Check(negotiation.GetProperty("outcome").GetString() == "fallback", "unknown revision: outcome=fallback");
+        Check(negotiation.GetProperty("requested").GetString() == "2025-06-18", "unknown revision: requested is reported back");
+        Check(negotiation.GetProperty("detail").GetString()!.Contains("not implemented", StringComparison.Ordinal),
+            "unknown revision: detail says the request is not implemented");
+        Check(stderrAll.Contains("protocol negotiation mismatch", StringComparison.Ordinal) &&
+              stderrAll.Contains("2025-06-18", StringComparison.Ordinal),
+            "unknown revision: the mismatch is logged on stderr");
+        Check(result.GetProperty("capabilities").GetProperty("tools").TryGetProperty("listChanged", out _),
+            "a fallback initialize still advertises the tools capability (no lost session)");
+    }
+
+    // (j) D-21: no requested revision is "defaulted", not a mismatch.
+    {
+        JsonElement negotiation = R(10).GetProperty("result").GetProperty("protocolNegotiation");
+        Check(negotiation.GetProperty("outcome").GetString() == "defaulted", "missing revision: outcome=defaulted");
+        Check(negotiation.GetProperty("requested").ValueKind == JsonValueKind.Null, "missing revision: requested=null");
+    }
+
+    // (k) D-21: a non-string protocolVersion is not an internal error; it is "no revision asked".
+    {
+        JsonElement response = R(11);
+        Check(response.TryGetProperty("result", out JsonElement result) && !response.TryGetProperty("error", out _),
+            "non-string protocolVersion still yields a result, not a JSON-RPC error");
+        Check(result.GetProperty("protocolNegotiation").GetProperty("outcome").GetString() == "defaulted",
+            "non-string protocolVersion is treated as no request");
+    }
+
+    // (l) D-21: the revision literal lives in exactly one place in the CLI sources.
+    {
+        string mcpDirectory = Path.Combine(root, "Cli", "Mcp");
+        List<string> holders = Directory.EnumerateFiles(mcpDirectory, "*.cs", SearchOption.AllDirectories)
+            .Where(file => File.ReadAllText(file).Contains("2024-11-05", StringComparison.Ordinal))
+            .Select(Path.GetFileName)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList()!;
+        Check(holders.Count == 1 && holders[0] == "McpProtocol.cs",
+            "the protocol revision literal lives only in Cli/Mcp/McpProtocol.cs (found: " + string.Join(", ", holders) + ")");
+
+        string allCli = string.Concat(Directory.EnumerateFiles(Path.Combine(root, "Cli"), "*.cs", SearchOption.AllDirectories)
+            .Select(File.ReadAllText));
+        int literalCount = 0;
+        int from = 0;
+        while ((from = allCli.IndexOf("2024-11-05", from, StringComparison.Ordinal)) >= 0) { literalCount++; from += 10; }
+        Check(literalCount == 1, "Cli/**/*.cs carries exactly one protocol revision literal (found " + literalCount + ")");
     }
 }
 finally
