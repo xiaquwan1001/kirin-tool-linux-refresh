@@ -163,8 +163,6 @@ public static class UdevRuleNotice
                     string rule = StripComment(line);
                     var terms = Assignments.Matches(rule).Select(m =>
                         (Key: m.Groups["key"].Value, Op: m.Groups["op"].Value, Value: m.Groups["value"].Value)).ToArray();
-                    foreach (string group in terms.Where(t => t.Key == "GROUP" && (t.Op == "=" || t.Op == ":=")).Select(t => t.Value))
-                        if (group.Length > 0 && !ruleGroups.Contains(group, StringComparer.Ordinal)) ruleGroups.Add(group);
                     foreach (string subsystem in new[] { "usb", "tty" })
                     {
                         bool vendor = terms.Any(t => t.Op == "==" && (t.Key == "ATTR{idVendor}" || t.Key == "ATTRS{idVendor}") && t.Value == "12d1");
@@ -194,6 +192,11 @@ public static class UdevRuleNotice
                             (t.Key == "SUBSYSTEMS" && subsystem == "tty" && t.Value == "usb")));
                         if (vendor && target && accessible && !restricted)
                         {
+                            // Only groups named by a rule that actually covers Huawei (12d1) are part
+                            // of the answer - collecting GROUP= from every vendor's rules would tell
+                            // the user to join dozens of unrelated groups.
+                            foreach (string group in terms.Where(t => t.Key == "GROUP" && (t.Op == "=" || t.Op == ":=")).Select(t => t.Value))
+                                if (group.Length > 0 && !ruleGroups.Contains(group, StringComparer.Ordinal)) ruleGroups.Add(group);
                             // Grants accumulate: one installed rule may be a uaccess rule and
                             // another a world-writable rule for the same subsystem; the session only
                             // needs *some* rule that works for it.

@@ -63,6 +63,10 @@ try {
  // ---- D-22 part 2: rule text + session context -------------------------------------
  Rule(UdevRuleNotice.DesktopRules);
  Check(UdevRuleNotice.Inspect(directories,desktop).Verdict=="rules+session","desktop session names the rules+session verdict");
+ File.WriteAllText(Path.Combine(high,"70-other-vendor.rules"),"ACTION==\"add\", SUBSYSTEM==\"usb\", ATTR{idVendor}==\"18d1\", MODE=\"0660\", GROUP=\"camera\", TAG+=\"uaccess\""+'\n');
+ Check(!UdevRuleNotice.Inspect(directories,desktop).Session!.RuleGroups.Contains("camera"),"groups are only collected from rules that cover Huawei 12d1");
+ Check(UdevRuleNotice.Inspect(directories,desktop).Session!.RuleGroups.SequenceEqual(new[]{"uucp"}),"the Huawei rule contributes exactly its own group");
+ File.Delete(Path.Combine(high,"70-other-vendor.rules"));
  Check(UdevRuleNotice.Inspect(directories,headlessInGroup).Complete,"a group member can use the rule without a logind session");
  Check(UdevRuleNotice.Inspect(directories,headlessInGroup).Verdict=="rules+session","group membership alone is a complete answer");
  UdevRuleCoverage headless=UdevRuleNotice.Inspect(directories,headlessOutOfGroup);
