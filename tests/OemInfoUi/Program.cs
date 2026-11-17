@@ -14,6 +14,13 @@ var model=owner.FindControl<TextBox>("TxtDeviceModel")!;
 var vendor=owner.FindControl<TextBox>("TxtVendor")!;
 var file=owner.FindControl<TextBox>("TxtOemInfoFile")!;
 var convert=owner.FindControl<Button>("BtnConvertOem")!;
+// Pin the chip before the first click: the Convert OEM capability gate runs before
+// field validation, and the ComboBox's default item depends on which bundled
+// loaders are present (CI's checkout resolved to kirin 9000 and answered
+// "Unsupported for kirin 9000" instead of the validation dialog). hisi65x_a is a
+// supported Convert target on every checkout, so the validation tests are about
+// validation again.
+owner.FindControl<ComboBox>("CpuComboBox")!.SelectedIndex=1;
 // The click handler is async: the validation dialog is created on a later
 // continuation, which CI's slower runners do not always reach with a single
 // RunJobs(). Pump until a window is owned (or 2 s pass) so the check is about
@@ -44,8 +51,6 @@ void Test(string name,string? m,string? v,string? f,string expected) {
 Test("untouched empty form",null,null,null,"Device Model and Vendor/Country cannot be empty.");
 Test("missing vendor","TEST-MODEL",null,null,"Device Model and Vendor/Country cannot be empty.");
 Test("whitespace model","   ","test/test",null,"Device Model and Vendor/Country cannot be empty.");
-// Force the file-based CPU route by selecting the first supported combo item (hisi65x_a).
-owner.FindControl<ComboBox>("CpuComboBox")!.SelectedIndex=1;
 Test("missing file with valid fields","TEST-MODEL","test/test",null,"Please select a valid OEMInfo file.");
 Test("empty file text","TEST-MODEL","test/test","","Please select a valid OEMInfo file.");
 owner.Close();
