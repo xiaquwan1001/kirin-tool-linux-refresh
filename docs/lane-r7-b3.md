@@ -49,9 +49,43 @@ $ dotnet run --project tests/SurfaceParity -c Release  -> 415 surface parity che
 冻结面：`MainWindow.axaml.cs` 属 boundary.json，已在同一 commit 刷新哈希，reference 里写明
 「行为保持型改动（写入口只是多了一个前置断言，审批/对话框/顺序/wire 未变）」。
 
-## 2. D-06（audit H20 / H23）pwn 跳转字面量外置
+## 2. D-06（audit H20 / H23）pwn 跳转字面量外置 — commit `cb5d3e4`
 
-状态: 待做
+状态: **完成**（纯行为保持型：字面量来源替换）
+
+### 判据（旧行为）
+`Services/VcomFlasher.cs` 的 `UploadData` 与 `ExploitBootrom` 各有一个 `switch`：
+`xloaderStart`（hisi710/970/980 = 0x2316D；710a/810/820/985/990 = 0x23155）与
+`returnAddr`（970/980/810 = 0x4DBC8；710/710a = 0x49BC8；820/985/990 = 0x673c8），
+两个 switch 都对未知 CPU 抛 `NotSupportedException("Exploit requested for an unsupported CPU: {cpu}.")`。
+
+### 落地
+| 文件 | 改动 |
+|---|---|
+| `Services/PwnJumpTable.cs`（新） | `readonly record struct PwnJumpAddresses(int XloaderStart, int ReturnAddr)`；`Entries` 显式表 8 项；`For(cpu)` 未知 CPU 抛同文本异常；`BootromHeadAddress = 0x22000` 常量 |
+| `Services/VcomFlasher.cs` | `PwnJumpAddresses jump = PwnJumpTable.For(exploitInfo.Cpu); await ExploitBootrom(jump);`；`ExploitBootrom` 里两个 switch 删除，`0x22000` 三处改用 `PwnJumpTable.BootromHeadAddress`。帧顺序 / 布局 / 小端 payload / 延时 / ACK / 重试均未改（已删除的 `cpu` 形参不再需要） |
+| `tests/PwnJumpTable`（新套件 53 checks） | 见下 |
+
+### 断言（为什么能证明「逐字节一致」）
+- 快照里的 8×2 个地址是**从被删除的 switch 抄下来的**，不是从新表抄的 —— 否则测试恒真。
+  对每个 SoC 断言 `For(cpu)` 的两个字段与快照逐值相等，且**表里没有 switch 之外的 key**（双向）。
+- 未知 CPU 仍抛异常、消息逐字相同（`Exploit requested for an unsupported CPU: hisi999.`），
+  且受支持的 CPU 不会解析成 0 地址（默认值陷阱）。
+- 与 `FirmwareUnlocker.CpuAddresses` 对齐：表的 key 集合 **等于** `PwnFlag=true` 的 SoC 集合；
+  每个 SoC 的 `PwnJumpTable.BootromHeadAddress` 等于其 `XLOADER` 段的地址。
+- 源码扫描（防回退）：`0x2316D / 0x23155 / 0x673c8 / 0x4DBC8 / 0x49BC8` 五个字面量在
+  `VcomFlasher.cs` 中已不存在，`cpu switch` 模式不存在，`PwnJumpTable.For(` 存在。
+
+### 证据
+```
+$ dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false   -> 3 警告（既有 AVLN3001）/ 0 个错误
+$ dotnet run --project tests/PwnJumpTable -c Release   rc=0  PwnJumpTable ALL PASS (53 checks)
+$ dotnet run --project tests/StableParity -c Release   rc=0  35 stable parity checks passed
+$ dotnet run --project tests/VcomPromptUi -c Release   rc=0  PASS...
+$ dotnet run --project tests/VcomUnlockCli -c Release  rc=0  98 VCOM unlock parity checks passed
+```
+冻结面：`Services/VcomFlasher.cs` 属 boundary.json，同 commit 刷新哈希并写明「仅字面量来源替换，
+wire/时序/重试未变」。`Services/FirmwareUnlocker.cs` 未改（对齐由测试断言，而不是改表）。
 
 ## 3. D-14（BB-13 / BB-16 GUI 侧）dload 临时目录 + sentinel
 

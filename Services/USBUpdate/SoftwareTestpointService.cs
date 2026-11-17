@@ -50,9 +50,11 @@ namespace Kirin_Tool.Services.USBUpdate
 
         public async Task EnterSoftwareTestpoint(string updateAppPath)
         {
-            // Was an empty catch: the directory is removed exactly as before (the next line
-            // recreates it) but the pre-delete listing and any failure are now recorded.
-            OpLog.CleanDirectory(_dloadDirectory, OpNames.UsbUpdateCleanup);
+            // D-14: the recursive delete now needs the sentinel to recognise the directory as this
+            // workflow's own scratch space (empty, or only files we wrote plus a workflow marker).
+            // A refusal deletes nothing and is logged; the extraction below then uses the directory
+            // as it is, so behaviour after a refusal matches the old "delete failed" path.
+            CleanScratchDirectory();
             Directory.CreateDirectory(_dloadDirectory);
 
             var extractor = new USBUpdateApp(_log, _dloadDirectory);
@@ -126,9 +128,8 @@ namespace Kirin_Tool.Services.USBUpdate
 
         public async Task ExitSoftwareTestpoint(string updateAppPath)
         {
-            // Was an empty catch: the directory is removed exactly as before (the next line
-            // recreates it) but the pre-delete listing and any failure are now recorded.
-            OpLog.CleanDirectory(_dloadDirectory, OpNames.UsbUpdateCleanup);
+            // D-14: same sentinel-gated cleanup as EnterSoftwareTestpoint.
+            CleanScratchDirectory();
             Directory.CreateDirectory(_dloadDirectory);
 
             var extractor = new USBUpdateApp(_log, _dloadDirectory);
@@ -146,5 +147,13 @@ namespace Kirin_Tool.Services.USBUpdate
 
             await patcher.FlashXloaderViaFastbootAsync(xloaderPath);
         }
+
+        /// <summary>
+        /// Remove the scratch directory only when <see cref="DloadSentinel"/> recognises it (D-14).
+        /// The listing and a failed/refused delete are recorded by the cleaner, so a refusal is
+        /// evidence instead of a silent no-op.
+        /// </summary>
+        private void CleanScratchDirectory() =>
+            DloadDirectoryCleaner.Clean(_dloadDirectory, _log, OpNames.UsbUpdateCleanup);
     }
 }

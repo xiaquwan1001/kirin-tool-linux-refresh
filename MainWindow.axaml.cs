@@ -156,15 +156,22 @@ namespace Kirin_Tool
             _oemInfoService = new OemInfoService(_fastbootClient);
             _fastbootFlasherService = new FastbootFlasherService(_xmlFastbootClient);
 
+            // D-14 / audit BB-13+BB-16: the scratch directory used to be the cwd-relative literal
+            // "dload", so the workflow recursively deleted whatever folder the user happened to run
+            // the GUI from. It is now the same kind of directory the CLI builds: a fresh random name
+            // under the temp dir, 0700, owned by this process. The recursive delete additionally has
+            // to pass DloadSentinel (see Services/USBUpdate/DloadSentinel.cs).
+            string dloadDirectory = Kirin_Tool.Utils.PrivateWorkDirectory.Create("kirin-tool-dload");
+
             _usbUpdateFlasherService = new USBUpdateFlasherService(
                 msg => ProcessRunner.WriteDiagnostic("USB Update", msg),
-                "dload", 
+                dloadDirectory,
                 async (title, message) => await ShowGlobalInteractionPromptAsync($"{title}: {message}")
             );
 
             _swTpService = new SoftwareTestpointService(
                 msg => ProcessRunner.WriteDiagnostic("Software Testpoint", msg),
-                "dload",
+                dloadDirectory,
                 _fastbootClient,
                 async (title, message) => await ShowGlobalInteractionPromptAsync($"{title}: {message}")
             );
