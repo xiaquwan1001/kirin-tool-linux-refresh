@@ -41,6 +41,21 @@ Reject(()=>FastbootReadResponses.Psid(Reply("OKAY\n")),"empty PSID response reje
 Check(FastbootReadResponses.OemVersion("(bootloader) NAM-LGRP1-CHN 102.0.1.272\nOKAY")=="NAM-LGRP1-CHN 102.0.1.272","colonless NAM OEM reply accepted");
 Check(FastbootReadResponses.OemVersion("(bootloader) :NOH-LGRP1-CHN 104.2.0.196\nOKAY")=="NOH-LGRP1-CHN 104.2.0.196","Kirin leading colon retained");
 Check(FastbootReadResponses.OemVersion("(bootloader) value\nFAILED")=="Unknown","failed version response rejected");
+// D-15 / audit BB-19: the rescue target list must come from the device platform when the device can
+// name one, and a dropdown fallback must be recorded as a manual selection (never as a device fact).
+{
+ var fromDevice=RescueChipResolver.Resolve("(bootloader) chipset: hisi9000","hisi980");
+ Check(fromDevice.Source==RescueChipSource.Device&&fromDevice.Chip=="hisi9000","device-reported platform wins over the dropdown");
+ Check(fromDevice.DeviceReport=="(bootloader) chipset: hisi9000","the raw getvar chipset answer is kept for the dialog/log");
+ Check(fromDevice.SourceLabel.Contains("device platform"),"the provenance label names the device platform");
+ var noAnswer=RescueChipResolver.Resolve(null,"hisi990");
+ Check(noAnswer.Source==RescueChipSource.ManualSelection&&noAnswer.Chip=="hisi990","no device answer degrades to the dropdown, marked manual");
+ Check(noAnswer.SourceLabel.Contains("manual CPU selection"),"the manual provenance label says the CPU was selected by hand");
+ Check(noAnswer.DeviceReportLabel=="no answer","an absent device answer is named, not blank");
+ var unknown=RescueChipResolver.Resolve("kirin999","hisi980");
+ Check(unknown.Source==RescueChipSource.ManualSelection&&unknown.Chip=="hisi980","an unknown platform string is not treated as a known chip");
+ Check(RescueChipResolver.Resolve("  HISI9000  ","hisi980").Source==RescueChipSource.Device,"the device answer is normalised before matching");
+}
 System.Environment.SetEnvironmentVariable("KIRIN_TOOL_SETTINGS_DIR", System.IO.Path.Combine(System.IO.Path.GetTempPath(), "kirin-tool-test-settings")); AppBuilder.Configure<App>().WithInterFont().UseSkia().UseHeadless(new AvaloniaHeadlessPlatformOptions{UseHeadlessDrawing=false}).SetupWithoutStarting();
 var owner=new MainWindow();
 // An accidental missing gate must never invoke a real fastboot client.
@@ -77,27 +92,112 @@ try {
   Fixture(app,complete?new[]{"ERECOVERY","ERECOVERY_RAMDISK","ERECOVERY_VENDOR"}:new[]{"ERECOVERY_RAMDISK","ERECOVERY_VENDOR"});
   owner.UsbUpdateFile.FilePath=app;
   var task=(Task)typeof(MainWindow).GetMethod("HandleRebootToUsbUpdate",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(owner,[])!;
-  // The approval gate answers first now: the rescue write is redline + irreversible, so the dialog
-  // only unlocks the approve button once the per-capability confirm phrase is typed.
-  PumpUntil(()=>owner.OwnedWindows.Any());
-  void ApproveIfAsked(string phrase) {
-   var approval=owner.OwnedWindows.FirstOrDefault(w=>w.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true);
-   if(approval==null) return;
-   var box=approval.GetVisualDescendants().OfType<TextBox>().FirstOrDefault();
-   if(box!=null){box.Text=phrase;Dispatcher.UIThread.RunJobs();}
-   var approve=approval.GetVisualDescendants().OfType<Button>().First(b=>b.Content?.ToString()=="Approve once");
-   Check(approve.IsEnabled,"redline approve button unlocks only after the confirm phrase is typed");
-   approve.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Dispatcher.UIThread.RunJobs();
+  // D-15: when the device cannot name its platform, the dropdown decides and that choice must be
+  // confirmed by hand before anything is written. The stub answers 'OKAY' (not an identity) for
+  // `getvar chipset`, so this whole loop exercises the manual-selection path.
+  bool manualDialogSeen=false;
+  void AnswerDialogs(string phrase) {
+   foreach(var window in owner.OwnedWindows.ToArray()) {
+    if(window.Title=="Rescue targets: manual CPU selection") {
+     manualDialogSeen=true;
+     var texts=window.GetVisualDescendants().OfType<TextBlock>().Select(t=>t.Text??string.Empty).ToList();
+     Check(texts.Any(t=>t.Contains("manual selection, not something the device told us")),"the manual-selection dialog says the target list is a hand choice, not a device fact");
+     Check(texts.Any(t=>t.Contains("hisi9000")||t.Contains("hisi980")||t.Contains("hisi990")),"the manual-selection dialog names the CPU the rescue plan will use");
+     window.GetVisualDescendants().OfType<Button>().First(b=>b.Content?.ToString()=="Continue with manual selection").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+     Dispatcher.UIThread.RunJobs();
+     continue;
+    }
+    if(window.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true) {
+     var box=window.GetVisualDescendants().OfType<TextBox>().FirstOrDefault();
+     if(box!=null){box.Text=phrase;Dispatcher.UIThread.RunJobs();}
+     var approve=window.GetVisualDescendants().OfType<Button>().First(b=>b.Content?.ToString()=="Approve once");
+     Check(approve.IsEnabled,"redline approve button unlocks only after the confirm phrase is typed");
+     approve.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Dispatcher.UIThread.RunJobs();
+    }
+   }
   }
-  ApproveIfAsked("I UNDERSTAND reboot-usb-update");
-  PumpUntil(()=>owner.OwnedWindows.Any(w=>w.GetType().Name=="ProcessDialogUapp"));
+  void PumpUntilProgress() {
+   var until=DateTime.UtcNow.AddSeconds(45);
+   while(!owner.OwnedWindows.Any(w=>w.GetType().Name=="ProcessDialogUapp")) {
+    Dispatcher.UIThread.RunJobs();
+    AnswerDialogs("I UNDERSTAND reboot-usb-update");
+    if(DateTime.UtcNow>until)throw new Exception("Stub rescue: no progress dialog; owned windows: ["+string.Join(", ",owner.OwnedWindows.Select(w=>w.GetType().Name+":"+w.Title))+"]");
+    Thread.Sleep(10);
+   }
+   Dispatcher.UIThread.RunJobs();
+   AnswerDialogs("I UNDERSTAND reboot-usb-update");
+  }
+  manualDialogSeen=false;
+  PumpUntilProgress();
+  Check(manualDialogSeen,"a device that cannot name its platform forces an explicit manual-selection confirmation");
   var progress=(Kirin_Tool.UI.ProcessDialogUapp)owner.OwnedWindows.Single();
+  Check(progress.Title?.Contains("manual CPU selection")==true,"the progress window names the target list as a manual CPU selection: "+progress.Title);
   try { PumpUntil(()=>progress.FindControl<Button>("CloseButton")!.IsVisible,60); }
   catch(Exception ex) { throw new Exception(ex.Message+" | status="+progress.CurrentOperationText+" | calls="+File.ReadAllText(calls).Replace("\n"," ")+" | taskDone="+task.IsCompleted); }
   var argv=File.ReadAllLines(calls).Select(line=>System.Text.Json.JsonSerializer.Deserialize<string[]>(line)!).ToArray();
   if(!complete) {Check(!argv.Any(a=>a.Contains("flash")),"missing combined ERECOVERY prevents all writes");Check(progress.CurrentOperationText.Contains("no images flashed"),"missing-image result clearly reported");}
   else {Check(argv.Where(a=>a.Contains("flash")).Select(a=>a[1]).SequenceEqual(new[]{"rescue_recovery","rescue_recovery_ramdisk","rescue_recovery_vendor"}),"real handler dispatches experimental rescue aliases");Check(progress.GetVisualDescendants().OfType<TextBlock>().Any(t=>t.Text?.Contains("partition length get error")==true),"bootloader failure shown in progress rows");Check(!argv.Any(a=>a.Contains("rescue_enter_recovery")),"failed writes prevent USB Update entry command");}
   progress.Close();PumpUntil(()=>task.IsCompleted);task.GetAwaiter().GetResult();
+ }
+ // D-15: the device is asked first. Same XML/archive fixture, a stub whose `getvar chipset` answers
+ // hisi9000, and the dropdown deliberately left on hisi980: the plan must follow the DEVICE, and no
+ // manual-selection dialog may appear.
+ combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi980")==true);Dispatcher.UIThread.RunJobs();
+ {
+  string deviceCalls=Path.Combine(fixtureDir,"device-calls"), deviceStub=Path.Combine(fixtureDir,"device-fastboot");
+  string[] deviceScript = {
+   "#!/usr/bin/python3",
+   "import sys,json",
+   "args=sys.argv[1:]",
+   "open(" + System.Text.Json.JsonSerializer.Serialize(deviceCalls) + ",'a').write(json.dumps(args)+chr(10))",
+   "if args==['devices']:",
+   "    print('TEST fastboot')",
+   "elif args==['getvar','chipset']:",
+   "    print('(bootloader) chipset: hisi9000')",
+   "elif args==['getvar','product']:",
+   "    print('(bootloader) product: ELS-AN00')",
+   "elif args==['oem','lock-state','info']:",
+   "    print('(bootloader) FB LockState: LOCKED')",
+   "elif 'flash' in args:",
+   "    print('FAILED (remote: partition length get error)'); sys.exit(1)",
+   "else:",
+   "    print('OKAY')",
+  };
+  File.WriteAllText(deviceStub,string.Join((char)10,deviceScript));
+  if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(deviceStub,UnixFileMode.UserRead|UnixFileMode.UserWrite|UnixFileMode.UserExecute);
+  typeof(MainWindow).GetField("_fastbootClient",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(owner,new FastbootClient(deviceStub));
+  File.WriteAllText(deviceCalls,"");File.WriteAllText(calls,"");
+  string deviceApp=Path.Combine(fixtureDir,"UPDATE.APP");
+  Fixture(deviceApp,"ERECOVERY","ERECOVERY_RAMDISK","ERECOVERY_VENDOR");
+  owner.UsbUpdateFile.FilePath=deviceApp;
+  bool deviceManualDialogSeen=false;
+  var deviceTask=(Task)typeof(MainWindow).GetMethod("HandleRebootToUsbUpdate",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(owner,[])!;
+  var until=DateTime.UtcNow.AddSeconds(45);
+  while(!owner.OwnedWindows.Any(w=>w.GetType().Name=="ProcessDialogUapp")) {
+   Dispatcher.UIThread.RunJobs();
+   foreach(var window in owner.OwnedWindows.ToArray()) {
+    if(window.Title=="Rescue targets: manual CPU selection") { deviceManualDialogSeen=true; throw new Exception("a device that names its platform must not ask for a manual selection"); }
+    if(window.Title?.StartsWith("Approve write:",StringComparison.Ordinal)==true) {
+     var box=window.GetVisualDescendants().OfType<TextBox>().FirstOrDefault();
+     if(box!=null){box.Text="I UNDERSTAND reboot-usb-update";Dispatcher.UIThread.RunJobs();}
+     window.GetVisualDescendants().OfType<Button>().First(b=>b.Content?.ToString()=="Approve once").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+     Dispatcher.UIThread.RunJobs();
+    }
+   }
+   if(DateTime.UtcNow>until)throw new Exception("device-platform rescue timed out; owned windows: ["+string.Join(", ",owner.OwnedWindows.Select(w=>w.GetType().Name+":"+w.Title))+"]");
+   Thread.Sleep(10);
+  }
+  Dispatcher.UIThread.RunJobs();
+  Check(!deviceManualDialogSeen,"no manual-selection dialog when the device reports its platform");
+  var deviceProgress=(Kirin_Tool.UI.ProcessDialogUapp)owner.OwnedWindows.Single();
+  Check(deviceProgress.Title?.Contains("device platform (hisi9000)")==true,"the progress window names the device platform as the source: "+deviceProgress.Title);
+  try { PumpUntil(()=>deviceProgress.FindControl<Button>("CloseButton")!.IsVisible,60); }
+  catch(Exception ex) { throw new Exception(ex.Message+" | deviceCalls="+File.ReadAllText(deviceCalls).Replace((char)10,' ')+" | calls="+File.ReadAllText(calls).Replace((char)10,' ')); }
+  var deviceArgv=File.ReadAllLines(deviceCalls).Select(line=>System.Text.Json.JsonSerializer.Deserialize<string[]>(line)!).ToArray();
+  Check(deviceArgv.Any(a=>a.SequenceEqual(new[]{"getvar","chipset"})),"the handler asks the device for its platform before planning the rescue write");
+  Check(deviceArgv.Where(a=>a.Contains("flash")).Select(a=>a[1]).SequenceEqual(new[]{"rescue_recovery","rescue_recovery_ramdisk","rescue_recovery_vendor"}),
+   "the rescue aliases follow the device platform (hisi9000), not the dropdown (hisi980): "+string.Join("|",deviceArgv.Where(a=>a.Contains("flash")).Select(a=>a[1])));
+  deviceProgress.Close();PumpUntil(()=>deviceTask.IsCompleted);deviceTask.GetAwaiter().GetResult();
  }
 } finally {Directory.Delete(fixtureDir,true);}
 combo.SelectedItem=combo.Items.OfType<ComboBoxItem>().Single(x=>x.Content?.ToString()?.Contains("hisi980")==true);Dispatcher.UIThread.RunJobs();

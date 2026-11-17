@@ -70,6 +70,20 @@ namespace Kirin_Tool.Services
                 _fastbootPath = ResolveDefaultFastbootPath(out bool systemFallback);
                 IsSystemFastboot = systemFallback;
             }
+
+            Parity = FastbootParity.Classify(_fastbootPath);
+
+            // D-07 / audit P11+P12+H32: the fallback used to be silent — the first symptom was
+            // "every read fails", which looks like a cable problem. Announce it once, at the moment
+            // the client exists, whoever constructed it (GUI, CLI, MCP) and for reads as well as
+            // writes. The write path keeps its own, more specific warning below.
+            if (!string.Equals(Parity, FastbootParity.Huawei, StringComparison.Ordinal))
+            {
+                ProcessRunner.WriteDiagnostic("FastbootClient",
+                    "warning: fastboot lineage " + Parity + " at " + _fastbootPath
+                    + " — " + FastbootParity.Describe(Parity)
+                    + (IsSystemFastboot ? " (the bundled Huawei client was not found)" : string.Empty));
+            }
         }
 
         /// <summary>The fastboot executable every command of this client is sent to.</summary>
@@ -81,6 +95,13 @@ namespace Kirin_Tool.Services
         /// path warns about it in the diagnostics log); an explicit path never sets this.
         /// </summary>
         public bool IsSystemFastboot { get; }
+
+        /// <summary>
+        /// D-07: `huawei` / `google` / `unknown`, from <see cref="FastbootParity"/>. A command that
+        /// reads device variables must be able to say which client it asked, because a platform-tools
+        /// client failing every `getvar` is not evidence about the device.
+        /// </summary>
+        public string Parity { get; }
 
         /// <summary>
         /// 「有设备可写吗」的唯一判据。上游只看「任意一台处于 fastboot 的设备」，

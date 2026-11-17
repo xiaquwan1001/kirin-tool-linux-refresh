@@ -178,6 +178,9 @@ def answer(text, code=0):
     sys.exit(code)
 if args[:1] == ["devices"]:
     answer("TEST fastboot")
+if mode == "silent-device" and args[:1] in (["getvar"], ["oem"]):
+    # D-08: connected, but every probe is rejected — the "connected but knows nothing" shape.
+    answer("FAILED (remote: command not allowed)", 1)
 if args[:1] == ["reboot"]:
     answer("FAILED (remote: reboot not allowed)", 1) if mode == "reboot-fail" else answer("OKAY")
 if args[:1] == ["flash"]:
@@ -725,9 +728,21 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     try
     {
         (int code, string stdout, string stderr) = Run("doctor", "--json");
-        Check(code == 0, "doctor against an override fastboot exits 0 (got " + code + "): " + stderr.Trim());
+        // D-07: the stub is not the bundled Huawei client. "found && runs" is no longer reported as a
+        // healthy environment: exit 6 (degraded, see Cli/ExitCodes.Degraded) and ok:false.
+        Check(code == 6, "doctor against a non-bundled override fastboot exits 6/degraded (got " + code + "): " + stderr.Trim());
         using JsonDocument doc = JsonDocument.Parse(stdout);
         JsonElement doctorRoot = doc.RootElement;
+        Check(doctorRoot.GetProperty("ok").GetBoolean() == false,
+            "doctor --json ok is false for a non-Huawei-parity fastboot (was unconditionally true before D-07)");
+        Check(doctorRoot.GetProperty("fastboot").GetProperty("parity").GetString() == "unknown",
+            "doctor --json reports fastboot.parity=unknown for an unverifiable override path");
+        JsonElement parityCheck = doctorRoot.GetProperty("checks").EnumerateArray()
+            .First(entry => entry.GetProperty("name").GetString() == "fastboot-parity");
+        Check(parityCheck.GetProperty("ok").GetBoolean() == false,
+            "the per-check table carries fastboot-parity with ok=false, next to fastboot-found/fastboot-runs");
+        Check(parityCheck.GetProperty("detail").GetString()!.Contains("unknown"),
+            "the fastboot-parity detail names the lineage token");
         Check(doctorRoot.GetProperty("degraded").EnumerateArray().Any(entry => entry.GetString() == "system-fastboot-fallback"),
             "doctor --json reports degraded:[system-fastboot-fallback]");
         Check(doctorRoot.GetProperty("fastboot").GetProperty("fallback").GetBoolean(),
@@ -750,6 +765,24 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         var core = typeof(Kirin_Tool.Services.FastbootClient).Assembly;
         Type signals = core.GetType("Kirin_Tool.Cli.DegradedSignals")
             ?? throw new Exception("FAIL Kirin_Tool.Cli.DegradedSignals is gone");
+        // D-07: the lineage classifier itself (path provenance is the only thing it can prove).
+        Type parityType = core.GetType("Kirin_Tool.Services.FastbootParity")
+            ?? throw new Exception("FAIL Kirin_Tool.Services.FastbootParity is gone");
+        var classifyParity = parityType.GetMethod("Classify", BindingFlags.Public | BindingFlags.Static)!;
+        string ParityOf(string? path, string? version = null) =>
+            (string)classifyParity.Invoke(null, new object?[] { path, version })!;
+        Check(ParityOf("/usr/bin/fastboot") == "google", "/usr/bin/fastboot is classified google (distro platform-tools)");
+        Check(ParityOf("/opt/android-sdk/platform-tools/fastboot") == "google",
+            "an SDK platform-tools layout is classified google");
+        Check(ParityOf(Path.Combine(AppContext.BaseDirectory, "fastboot", "fastboot")) == "huawei",
+            "the bundled directory is the only path that proves huawei lineage");
+        Check(ParityOf("") == "unknown" && ParityOf(null) == "unknown", "an absent fastboot has no lineage (unknown)");
+        Check(ParityOf(stub) == "unknown", "an arbitrary override path is unknown, not silently assumed Huawei");
+        Check(ParityOf("/tmp/fastboot", "fastboot version 35.0.2 (platform-tools)") == "google",
+            "a version line that says platform-tools is google even from an odd path");
+        Check(new Kirin_Tool.Services.FastbootClient("/usr/bin/fastboot").Parity == "google",
+            "FastbootClient exposes the lineage of the binary every one of its commands will run");
+
         var classify = signals.GetMethod("IsSystemFastbootFallback", BindingFlags.Public | BindingFlags.Static)!;
         Check((bool)classify.Invoke(null, new object[] { "/usr/bin/fastboot" })!,
             "/usr/bin/fastboot is classified as the system fallback");
@@ -760,6 +793,70 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     finally
     {
         stubEnvironment.Clear();
+    }
+}
+
+// ---------------------------------------------------------------- 13. D-08: connected vs useful
+// "connected" and "the loader answered something" used to be the same verdict: a device that
+// accepted the connection and rejected every getvar produced connected:true + exit 0, exactly like
+// a healthy device. They are now two judgements (device.status / device.informationallyUseful) and
+// two exit codes (0 vs 6).
+{
+    stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    stubEnvironment["STUB_MODE"] = "silent-device";
+    try
+    {
+        (int code, string stdout, string stderr) = Run("info", "--json");
+        Check(code == 6, "info against a connecting but silent loader exits 6/degraded (got " + code + "): " + stderr.Trim());
+        using JsonDocument doc = JsonDocument.Parse(stdout);
+        JsonElement device = doc.RootElement.GetProperty("device");
+        Check(device.GetProperty("connected").GetBoolean(), "info still reports connected:true for a silent loader (no lie about the link)");
+        Check(device.GetProperty("status").GetString() == "connected-but-empty",
+            "info distinguishes 'connected-but-empty' from 'ok' in device.status");
+        Check(device.GetProperty("informationallyUseful").GetBoolean() == false,
+            "info says the device is not informationally useful");
+        Check(device.GetProperty("variables").EnumerateObject().Any() == false,
+            "info's variables map is empty (the loader rejected every getvar)");
+
+        (code, stdout, stderr) = Run("doctor", "--json");
+        Check(code == 6, "doctor against the same silent loader exits 6/degraded (got " + code + "): " + stderr.Trim());
+        using JsonDocument doctorDoc = JsonDocument.Parse(stdout);
+        JsonElement doctorRoot = doctorDoc.RootElement;
+        Check(doctorRoot.GetProperty("status").GetString() == "connected-but-empty",
+            "doctor carries the same device-level status token");
+        Check(doctorRoot.GetProperty("ok").GetBoolean() == false,
+            "doctor ok is false when the device connects and answers nothing");
+        Check(doctorRoot.GetProperty("device").GetProperty("informationallyUseful").GetBoolean() == false,
+            "doctor device.informationallyUseful is false");
+        Check(doctorRoot.GetProperty("checks").EnumerateArray()
+                .First(entry => entry.GetProperty("name").GetString() == "fastboot-device")
+                .GetProperty("ok").GetBoolean(),
+            "the per-check table keeps the two judgements apart: fastboot-device is ok (it IS connected) while psid/ptable are not");
+
+        // Contrast: a loader that answers product is useful, and only the lineage keeps doctor off 0.
+        stubEnvironment["STUB_MODE"] = "ok";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 0, "info against an answering loader still exits 0 (got " + code + "): " + stderr.Trim());
+        using JsonDocument healthyDoc = JsonDocument.Parse(stdout);
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("status").GetString() == "ok",
+            "info device.status is ok when a variable is readable");
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("informationallyUseful").GetBoolean(),
+            "info device.informationallyUseful is true when a variable is readable");
+        Check(healthyDoc.RootElement.GetProperty("device").GetProperty("variables").GetProperty("product").GetString() == "ELS-AN00",
+            "the readable variable is still reported unchanged");
+
+        (code, stdout, _) = Run("doctor", "--json");
+        using JsonDocument healthyDoctorDoc = JsonDocument.Parse(stdout);
+        Check(healthyDoctorDoc.RootElement.GetProperty("device").GetProperty("informationallyUseful").GetBoolean(),
+            "doctor agrees the answering device is informationally useful");
+        Check(healthyDoctorDoc.RootElement.GetProperty("status").GetString() == "degraded-fastboot-parity",
+            "with a usable device the remaining status is the lineage one (the stub is not the bundled client)");
+        Check(code == 6, "doctor still exits 6 for the lineage reason, not because of the device (got " + code + ")");
+    }
+    finally
+    {
+        stubEnvironment.Clear();
+        stubEnvironment["KIRIN_FASTBOOT"] = stub;
     }
 }
 

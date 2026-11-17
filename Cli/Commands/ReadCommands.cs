@@ -16,9 +16,6 @@ internal sealed class InfoCommand : ICliCommand
     public async Task<int> ExecuteAsync(ParsedArgs args, CliContext context, CancellationToken cancellationToken)
     {
         var session = await FastbootSession.TryOpenAsync();
-        int exit = session == null ? ExitCodes.FileOrVerify
-            : session.Connected ? ExitCodes.Ok
-            : ExitCodes.NoDevice;
 
         var variables = new SortedDictionary<string, string?>(StringComparer.Ordinal);
         bool psidReadable = false;
@@ -43,6 +40,25 @@ internal sealed class InfoCommand : ICliCommand
             .Select(entry => new { image = entry.Image, target = entry.Target })
             .ToList();
 
+        // D-08 (audit F17/F18): "connected" and "the loader tells us something" are two different
+        // facts. A loader that accepts the connection and rejects every getvar used to be reported
+        // exactly like a healthy device (connected:true, exit 0), so "all reads failed" was
+        // indistinguishable from "this device has no readable information".
+        bool informationallyUseful = session is { Connected: true } &&
+            (variables.Any(pair => pair.Value != null) || psidReadable || partitionCount is > 0);
+        string deviceStatus = session == null ? "fastboot-missing"
+            : !session.Connected ? "not-connected"
+            : !informationallyUseful ? "connected-but-empty"
+            : "ok";
+        int exit = deviceStatus switch
+        {
+            "fastboot-missing" => ExitCodes.FileOrVerify,
+            "not-connected" => ExitCodes.NoDevice,
+            // Exit 6, not 0: the command succeeded, but the answer is "nothing is readable here".
+            "connected-but-empty" => ExitCodes.Degraded,
+            _ => ExitCodes.Ok,
+        };
+
         var payload = new
         {
             tool = new
@@ -55,10 +71,15 @@ internal sealed class InfoCommand : ICliCommand
             {
                 found = session != null,
                 path = session?.ExecutablePath,
+                // D-07: the same lineage token as `doctor`, so "connected but every getvar failed"
+                // can be answered by the client's provenance instead of blaming the cable.
+                parity = FastbootParity.Classify(session?.ExecutablePath),
             },
             device = new
             {
                 connected = session?.Connected ?? false,
+                status = deviceStatus,
+                informationallyUseful,
                 chip,
                 psidReadable,
                 partitionCount,
@@ -82,7 +103,7 @@ internal sealed class InfoCommand : ICliCommand
             context.Output.WriteLine(session == null
                 ? "fastboot: not found (set KIRIN_FASTBOOT or add fastboot to PATH)"
                 : $"fastboot: {session.ExecutablePath}");
-            context.Output.WriteLine($"device: {(session?.Connected == true ? "connected" : "not connected")}");
+            context.Output.WriteLine($"device: {deviceStatus} (connected: {(session?.Connected == true ? "true" : "false")}, readable info: {informationallyUseful})");
             foreach (var pair in variables.Where(pair => pair.Value != null))
                 context.Output.WriteLine($"  {pair.Key}: {pair.Value}");
             if (session is { Connected: true })
@@ -99,6 +120,9 @@ internal sealed class InfoCommand : ICliCommand
             context.Diag("error: fastboot binary not found; set KIRIN_FASTBOOT or install platform-tools");
         else if (!session.Connected)
             context.Diag("note: no fastboot device detected (exit 2)");
+        else if (!informationallyUseful)
+            context.Diag("warning: device is connected but answered no readable variable (exit 6);"
+                + " check the fastboot lineage (info --json fastboot.parity) before blaming the cable");
 
         return exit;
     }
@@ -150,10 +174,23 @@ internal sealed class DoctorCommand : ICliCommand
             : "unknown";
 
         var loaders = BundledLoaders.Inventory();
+
+        // D-08 (audit F17/F18): a connected loader that rejects every probe is not the same finding
+        // as a healthy device. `status` is the three-state answer, `ok` is only true for "ok".
+        bool informationallyUseful = connected &&
+            (probes.Any(pair => pair.Value != null) || psidReadable || partitionCount is > 0);
+
+        // D-07 (audit P11/P12/P13/H32): "found && runs" is not the same as "the client that works".
+        // The lineage token is derived from the resolved path (the bundled directory is the only
+        // provenance the tool can prove) and, when available, the `--version` line.
+        string parity = FastbootParity.Classify(fastbootPath, fastbootVersion);
+        bool parityOk = string.Equals(parity, FastbootParity.Huawei, StringComparison.Ordinal);
+
         var checks = new List<object>
         {
             new { name = "fastboot-found", ok = fastbootPath != null, detail = fastbootPath ?? "not found (KIRIN_FASTBOOT / PATH)" },
             new { name = "fastboot-runs", ok = fastbootVersion != null, detail = fastbootVersion ?? "fastboot --version failed" },
+            new { name = "fastboot-parity", ok = parityOk, detail = parity + " — " + FastbootParity.Describe(parity) },
             new { name = "adb-found", ok = adbPath != null, detail = adbPath ?? "not found (optional, KIRIN_ADB / PATH)" },
             new { name = "loaders-bundled", ok = loaders.Count > 0, detail = $"{loaders.Count} chip directories under {BundledLoaders.Directory}" },
             new { name = "fastboot-device", ok = connected, detail = connected ? (probes.GetValueOrDefault("product") ?? "connected") : "no device in fastboot mode" },
@@ -161,8 +198,18 @@ internal sealed class DoctorCommand : ICliCommand
             new { name = "ptable-readable", ok = partitionCount is > 0, detail = partitionCount is > 0 ? $"{partitionCount} partitions" : "getvar ptable unavailable" },
         };
 
+        // Precedence: the device-level finding wins when there is one, because it is the direct
+        // answer to "why did every read fail"; the lineage stays visible in fastboot.parity/checks
+        // (and both branches exit 6).
+        string status = fastbootPath == null ? "fastboot-missing"
+            : fastbootVersion == null ? "fastboot-unrunnable"
+            : connected && !informationallyUseful ? "connected-but-empty"
+            : !parityOk ? "degraded-fastboot-parity"
+            : "ok";
+
         var payload = new
         {
+            status,
             tool = new { name = ToolInfo.Name, version = ToolInfo.Version, framework = ToolInfo.Framework, baseDirectory = AppContext.BaseDirectory },
             host = new
             {
@@ -170,7 +217,7 @@ internal sealed class DoctorCommand : ICliCommand
                 architecture = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
                 runtime = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier,
             },
-            fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, devices = fastbootDevices },
+            fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, parity, devices = fastbootDevices },
             adb = new { found = adbPath != null, path = adbPath, version = adbVersion, devices = adbDevices },
             loaders = new
             {
@@ -181,6 +228,7 @@ internal sealed class DoctorCommand : ICliCommand
             device = new
             {
                 connected,
+                informationallyUseful,
                 chip,
                 probes = probes.Where(pair => pair.Value != null).ToDictionary(pair => pair.Key, pair => pair.Value!),
                 psidReadable,
@@ -188,7 +236,11 @@ internal sealed class DoctorCommand : ICliCommand
                 dumpCapable = connected && fastbootPath != null,
             },
             checks,
-            ok = fastbootPath != null && fastbootVersion != null,
+            // D-07: a non-Huawei binary can no longer be reported as healthy; the environment can be
+            // "found and running" and still be the wrong client (audit P13).
+            // D-08: "ok" now means the three-state status is ok — a connected device that answers
+            // nothing is "connected-but-empty", not ok.
+            ok = status == "ok",
         };
 
         if (context.Json)
@@ -199,6 +251,8 @@ internal sealed class DoctorCommand : ICliCommand
         {
             context.Output.WriteLine($"{ToolInfo.Name} {ToolInfo.Version} on {payload.host.os} ({payload.host.architecture})");
             context.Output.WriteLine($"fastboot: {fastbootPath ?? "NOT FOUND"}  {(fastbootVersion != null ? "[" + fastbootVersion + "]" : string.Empty)}");
+            context.Output.WriteLine($"fastboot parity: {parity}  ({(parityOk ? "ok" : "NOT the bundled Huawei client")})");
+            context.Output.WriteLine($"status: {status}  (ok: {status == "ok"})");
             context.Output.WriteLine($"adb:      {adbPath ?? "not found (optional)"}  {(adbVersion != null ? "[" + adbVersion + "]" : string.Empty)}");
             context.Output.WriteLine($"fastboot devices: {(fastbootDevices.Count == 0 ? "(none)" : string.Join(" | ", fastbootDevices))}");
             context.Output.WriteLine($"adb devices:      {(adbDevices.Count == 0 ? "(none)" : string.Join(" | ", adbDevices))}");
@@ -231,6 +285,21 @@ internal sealed class DoctorCommand : ICliCommand
         {
             context.Diag("error: fastboot is present but does not run; check the binary and its permissions");
             return ExitCodes.FileOrVerify;
+        }
+        if (!parityOk)
+        {
+            // Exit 6, not 0: the environment runs, but a read through this client is expected to fail
+            // against Huawei temporary loaders, and the caller must not read that as "healthy".
+            context.Diag("warning: fastboot parity " + parity + " — " + FastbootParity.Describe(parity)
+                + "; set KIRIN_FASTBOOT to the bundled client (exit 6)");
+            return ExitCodes.Degraded;
+        }
+        if (status == "connected-but-empty")
+        {
+            // D-08: report the shape of the failure, not just "not ok".
+            context.Diag("warning: device is connected but answered no readable variable"
+                + " (getvar chipset/product, oem get-psid and getvar ptable all failed); status=connected-but-empty (exit 6)");
+            return ExitCodes.Degraded;
         }
         return ExitCodes.Ok;
     }

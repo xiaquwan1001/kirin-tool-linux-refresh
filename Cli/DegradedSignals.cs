@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json.Nodes;
+using Kirin_Tool.Services;
 
 namespace Kirin_Tool.Cli;
 
@@ -33,15 +34,10 @@ internal static class DegradedSignals
     {
         if (string.IsNullOrWhiteSpace(fastbootPath)) return false;
 
-        string full;
-        try { full = Path.GetFullPath(fastbootPath); }
-        catch (Exception) { return false; }
-
-        string bundledDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "fastboot"));
-        string? directory = Path.GetDirectoryName(full);
-        if (directory == null) return false;
-        return !string.Equals(Path.TrimEndingDirectorySeparator(directory),
-            Path.TrimEndingDirectorySeparator(bundledDirectory), StringComparison.Ordinal);
+        // D-07: one source of truth for "is this the client we ship". Path semantics are unchanged
+        // (bundled directory = not a fallback, absent path = no token); the classifier adds the
+        // google/unknown distinction that `doctor` reports.
+        return !FastbootParity.IsHuawei(fastbootPath);
     }
 
     /// <summary>Every degradation the current process can prove, in a stable order.</summary>
