@@ -35,6 +35,22 @@
   GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
 - **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
 
+## v2.4.26 变更（2026-11-17，主机侧，无设备）
+
+r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命令、时序与重试），`tests/suites.txt` **28/28 rc=0**（新增 BatteryGate / PwnJumpTable / DloadSentinel 三套）。
+
+- **D-07 → fixed-in-2.4.26**（P11/P12/P13/H32）：找不到随包 fastboot 的回落不再静默——回落产生显式告警事件，血统判定收在 `Services/FastbootParity.cs`，`doctor` 的 per-check 增加 `fastboot-parity`（huawei / google-platform-tools / unknown），`ok` 不再在非华为血统时无条件为真。
+- **D-08 → fixed-in-2.4.26**（F17/F18）：`connected` 与「问出东西」分成两个判据——`info`/`doctor` 用 `status` 字段 + exit 6 表示「连上但一无所知」，不再与「连接失败」共用 exit 0/1。
+- **D-15 → fixed-in-2.4.26**（BB-19）：rescue 目标分区改由设备真实平台决定（只读 `getvar chipset`，`Services/RescueChipResolver.cs`）；CPU 下拉只是 `ManualSelection` 回退，必须显式确认并在进度窗标题里标明来源。
+- **D-16 → fixed-in-2.4.26**（S14）：电量 <50% 从横幅变成写前闸门——`Services/Verdict/BatteryGate.cs` 是纯逻辑（注入式读取），GUI 四个写入口 + 所有 `GatedDeviceWriteCommand` 写命令 + `flash-ota`/`flash-xml` 统一过闸（拒绝时 `gate=battery, level=N`、exit 4；读不到电量放行但报 `battery-unknown`；`reboot` 显式豁免）。
+- **D-06 → fixed-in-2.4.26**（H20/H23）：pwn 跳转地址外置为 `Services/PwnJumpTable.cs`（8 个 SoC 的 `xloaderStart`/`returnAddr`），与 `FirmwareUnlocker.CpuAddresses` 的 PwnFlag 集合由测试双向对齐；旧 `switch` 字面量快照进 `tests/PwnJumpTable`（含源码扫描防回退）。
+- **D-14 → fixed-in-2.4.26**（BB-13/BB-16 GUI 侧）：GUI 不再用相对 CWD 的 `dload`（改 `PrivateWorkDirectory.Create("kirin-tool-dload")`）；三个删除点先过 `DloadSentinel`——只有空目录或「全是本工作流文件且有标记」才删，`/`、home、含外来文件的目录一律不删。
+- **D-12 → fixed-in-2.4.26**（BB-09）：USB Update 整包刷写补上 CLI/MCP 面（`usb-update-flash`，`Cli/Commands/UsbUpdateFlashCommand.cs`），复用既有 `Services/USBUpdate` 实现与三态 `UsbUpdateVerdict`，与 GUI 同源调用同一 service 方法，同样过审批/红线/不可逆闸门；注册表与 `SurfaceParity` H1/H3/H7 同步。
+- **M2 → fixed-in-2.4.26**（round5 §10 遗留）：sparse `TotalBlocks` 从「声明」变成「被校验的声明」——合并前把每个 chunk 折算成块数（raw = payload / BlockSize、fill/dontcare = ChunkSize、crc32 = 0）与 `header.TotalBlocks` 比对，不一致即 `SparseBlockSum` verdict=failed 并拒绝输入；合法输入的合并字节与输出 layout 完全不变（Windows golden byte 测试逐字节相等）。
+- **`oem dump-emmc` argv 列表重载 → fixed-in-2.4.26**（round5 §10 遗留）：补上多 argv 形式与解析，既有单 argv 行为不变。
+- **仍未动**：S19（`oeminfoerase-disablewp` 返回值丢弃，属 D-01 家族）。
+- 验证口径：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 25 个既有套件 + 3 个新套件全 PASS；`tests/StableParity/boundary.json` 只刷新被真实改动文件的 hash，并在 `reference` 里写清行为变更理由。
+
 ## v2.4.25 变更（2026-11-17，主机侧，无设备）
 
 本轮只做「纯主机可验证」的四条，全部是**判据收紧**（wire 命令/时序/重试不变）：
@@ -113,9 +129,9 @@
 | D-03 | F04 残余（CLI/MCP 侧） | `write-sn` 的 CLI/MCP 路径**没有读回比对**，只有 fastboot 退出码 | fixed-in-2.4.15 | `Cli/Commands/DeviceWriteCommands.cs:210` 原文 "no read-back check is available on this path"；GUI 侧已有（§1）。**误判后果**：同一个能力在 GUI 会报「未确认」，在 CLI/MCP 报成功 |
 | D-04 | F10 / S03 / S04 / S06 / S07 / S09 / F13 | USB Update 通道的成功判据仍然虚：握手 3 次失败只写一行日志继续；缺 `.img`/`.img.header`/0 字节的分区 `continue` 且不计失败；读到 0 字节 `break` 后 `return null`（=成功）；`if (success) … else { }` 空分支 | fixed-in-2.4.15 | 五处全部改成显式结论/事件：握手 `DoHandshake` 返回 bool（失败 = `HandshakeEstablished=false` + `degraded:`），缺 `.img`/`.img.header` → `Skipped[]`、0 字节 → `Missing[]`（`skipped:`/`missing:`），`bytesRead==0` → `NoteStreamEndedEarly`（不再是成功），空 `if/else` → `degraded:` 事件。结论三态见 `Services/USBUpdate/UsbUpdateVerdict.cs`，上层映射见 [usb-update-verdict.md](usb-update-verdict.md)；`tests/UsbUpdateVerdict`（39 checks）逐条覆盖；`StableParity` 哈希按「结论模型变化、协议未变」刷新 |
 | D-05 | F03 / S17 | GUI 把被跳过的分区计成成功：`successCount++` → 「Successfully flashed all N partitions!」恒成立 | **fixed-in-2.4.25** | 计数与文案抽到 `Services/Verdict/FlashTally.cs`（skipped 单列、`attempted = total - skipped`、空计划不算成功），`MainWindow.axaml.cs` 的 `FlashPartitionsWithProgress` 改用它；跳过行的文案 `"Skipped"` 不变；`tests/GuiQol` 6 条断言 |
-| D-06 | H20 / H23 | pwn 后跳转的 `xloaderStart` 与漏洞 `returnAddr` 仍是 `switch` 里的裸字面量，与 `CpuAddresses` 表分离，无法外置/审查 | open | `Services/VcomFlasher.cs:213-222`、`:239-247`。审计定为「变砖级」字面量，改一个字节即换行为；外置表尚未做 |
-| D-07 | P11 / P12 / P13 / H32 | 找不到随包 fastboot 时**静默**回落到 `/usr/bin/fastboot` → PATH（Google platform-tools 对华为临时 loader 的 `getvar` 全面失败）；`doctor` 的 `ok` 只判「找到 && 能跑」，不判血统 | open | `Services/FastbootClient.cs:78-86`（回落后无警告）；`Cli/Commands/ReadCommands.cs:191`（`ok = fastbootPath != null && fastbootVersion != null`）、`:143-156`（有 per-check 表，无 parity 探针）。**误判后果**：AI 按 `ok:true` 认为环境健康，随后所有读都失败并被归因到「连接问题」 |
-| D-08 | F17 / F18 | `doctor` 的 `ok` 与 `info` 的「连上但一无所知」语义仍未区分 | open | `Cli/Commands/ReadCommands.cs:191`、`:27-36`（`connected` 为真即 exit 0，变量可全空） |
+| D-06 | H20 / H23 | pwn 后跳转的 `xloaderStart` 与漏洞 `returnAddr` 仍是 `switch` 里的裸字面量，与 `CpuAddresses` 表分离，无法外置/审查 | **fixed-in-2.4.26** | `Services/VcomFlasher.cs:213-222`、`:239-247`。审计定为「变砖级」字面量，改一个字节即换行为；外置表尚未做 |
+| D-07 | P11 / P12 / P13 / H32 | 找不到随包 fastboot 时**静默**回落到 `/usr/bin/fastboot` → PATH（Google platform-tools 对华为临时 loader 的 `getvar` 全面失败）；`doctor` 的 `ok` 只判「找到 && 能跑」，不判血统 | **fixed-in-2.4.26** | `Services/FastbootClient.cs:78-86`（回落后无警告）；`Cli/Commands/ReadCommands.cs:191`（`ok = fastbootPath != null && fastbootVersion != null`）、`:143-156`（有 per-check 表，无 parity 探针）。**误判后果**：AI 按 `ok:true` 认为环境健康，随后所有读都失败并被归因到「连接问题」 |
+| D-08 | F17 / F18 | `doctor` 的 `ok` 与 `info` 的「连上但一无所知」语义仍未区分 | **fixed-in-2.4.26** | `Cli/Commands/ReadCommands.cs:191`、`:27-36`（`connected` 为真即 exit 0，变量可全空） |
 | D-09 | F09 / S22 | dump 成功判据仍是「文件存在且 >0 字节」，没有与 header 声明大小/分区大小比对 | **fixed-in-2.4.25** | `Services/Verdict/DumpVerdict.cs`（纯函数，三态 + `file-truncated`/`file-padded`/`SizeChecked`）；`DumpPartitionAsync` 先只读 `getvar partition-size:<name>` 取声明大小（不支持 ⇒ unknown，不静默跳过），两个 verb 共用同一判据；`tests/VcomPromptUi` 9 条断言 |
 | D-10 | F12 / P27 | `ClassifyCommandOutput` 仍按子串判 OKAY/SUCCESS 与 FAIL/ERROR，且匹配的是 stdout+stderr 混流 | **fixed-in-2.4.25** | `Services/Verdict/CommandOutput.cs`：失败 token 行首锚定/显式短语、两个流都查且失败优先；成功 token 只认 **stdout** 行首。`Models/ProcessResult.cs` 新增 `StandardOutput`/`ErrorOutput`（`Output` 合并串保留），`Utils/ProcessRunner.cs` 填两流；GUI 委托新判据；`tests/VcomPromptUi` 7 条断言 |
 | D-11 | F05 | oeminfo 转换「没有任何块命中」时仍 `IsSuccess=true` | **fixed-in-2.4.25** | `OemInfoEditor.EditEntriesDetailed` 回传 `ModelEntriesRewritten`/`RegionEntriesRewritten`（`EditEntries` 签名与有效输入的字节都不变）；`OemInfoService` 对 0 命中出 `conversion:no-entry-rewritten`、不交 `ConvertedData`；`tests/OpLogging` 5 条断言 |
@@ -124,11 +140,11 @@
 
 | # | 编号 | 摘要 | 状态 | 证据 |
 | :--- | :--- | :--- | :--- | :--- |
-| D-12 | BB-09 | GUI 的「USB Update 模式刷整包」仍无 CLI/MCP 面（`flash-ota` 只走 fastboot） | open | GUI `MainWindow.axaml.cs:968,979`（`StartUsbUpdateFlash`）；注册表全表（`CapabilityRegistry.cs:64-160`）无对应能力 |
+| D-12 | BB-09 | GUI 的「USB Update 模式刷整包」仍无 CLI/MCP 面（`flash-ota` 只走 fastboot） | **fixed-in-2.4.26** | GUI `MainWindow.axaml.cs:968,979`（`StartUsbUpdateFlash`）；注册表全表（`CapabilityRegistry.cs:64-160`）无对应能力 |
 | D-13 | BB-04 / H90 | `downgrade-enable` 仍 `PlanOnly`：CLI/MCP 只打印 4 条 `oem oeminfoerase-*` 计划，GUI 照旧真擦，**且 GUI 这条写路径也不经过审批闸门**（`HandleEnableDowngrade` 内直接 `EnableDowngradeWithSteps()`，只有装饰性 `Task.Delay(500)`×4） | fixed-in-2.4.15 | 拆成 `downgrade-enable`（PlanOnly，exit 4）与 `downgrade-erase`（Write + 红线 + 不可逆 + `RedlineTypedConfirm`，CLI/MCP 同名）：注册表 `Services/Capabilities/CapabilityRegistry.cs`；GUI `HandleEnableDowngrade` 先 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`（op 日志 `downgrade.erase`，verdict `step-outcomes:n/4-okay`）；门禁 `SurfaceParity` H1/H3/H7 + `ApprovalGate` + `WriteGates`；详见 [downgrade-gate.md](downgrade-gate.md) |
-| D-14 | BB-13 / BB-16（GUI 侧） | GUI 仍用相对 CWD 的 `dload`，且开跑前 `Directory.Delete(dload, true)`（无 sentinel 校验） | open | `MainWindow.axaml.cs:159,165`（字面量 `"dload"`）；`Services/USBUpdate/SoftwareTestpointService.cs:46-49` |
-| D-15 | BB-19 | rescue 目标分区仍由 **CPU 下拉** 决定，不读设备真实平台 | open | `MainWindow.axaml.cs:2027`（`RescuePartitionPlan.ForChip(GetSelectedCpu())`） |
-| D-16 | S14 | 电量 <50% 仍只是横幅，任何写路径都不因电量被拒 | open | `MainWindow.ChipCapabilities.cs:72-95` |
+| D-14 | BB-13 / BB-16（GUI 侧） | GUI 仍用相对 CWD 的 `dload`，且开跑前 `Directory.Delete(dload, true)`（无 sentinel 校验） | **fixed-in-2.4.26** | `MainWindow.axaml.cs:159,165`（字面量 `"dload"`）；`Services/USBUpdate/SoftwareTestpointService.cs:46-49` |
+| D-15 | BB-19 | rescue 目标分区仍由 **CPU 下拉** 决定，不读设备真实平台 | **fixed-in-2.4.26** | `MainWindow.axaml.cs:2027`（`RescuePartitionPlan.ForChip(GetSelectedCpu())`） |
+| D-16 | S14 | 电量 <50% 仍只是横幅，任何写路径都不因电量被拒 | **fixed-in-2.4.26** | `MainWindow.ChipCapabilities.cs:72-95` |
 | D-17 | H45 | 能力矩阵仍是「不是 Kirin9000 就全允许」（未知 SoC 默认放行） | **fixed-in-2.4.25** | `Services/ChipCapabilities.cs`：`IsKnownChip()` 白名单唯一来源 = `FirmwareUnlocker.CpuAddresses` + `hisi9000`；未知 chip 连只读都拒；`NoticeFor()` 不冒充 kirin9000 文案；`tests/Kirin9000` 5 chip × 6 operation 否定断言 |
 | D-18 | P02 / H15 | Linux 自动探测仍按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR（已有 `--port`/`BulkOnly` 逃逸，默认路径未改成能力探测） | open | `Services/VcomFlasher.cs:117-122` |
 | D-19 | H06 / H50 / H51 | loader 目录仍是 `<base>/loaders/<cpu>`：CLI 只有 `--loader-dir` 参数，没有 `KIRIN_LOADERS_DIR`；命名仍是 `<stage>.ktl`/`fastbootf.ktl` | open | `Services/FirmwareUnlocker.cs:89,178`；`Cli/CommandSupport.cs:195-229` |
