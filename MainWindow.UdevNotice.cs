@@ -19,9 +19,15 @@ public partial class MainWindow
     {
         this.FindControl<Border>("UdevNotice")!.IsVisible = UdevRuleNotice.IsAppImage && !coverage.Complete;
         this.FindControl<TextBox>("UdevCommands")!.Text = UdevRuleNotice.ApplyCommands;
+        // D-22: two conclusions, not one. "Rules installed" and "this session can use them" are
+        // different findings - TAG+="uaccess" does nothing over ssh/container sessions - so the
+        // banner never claims the host is ready when only the rule text is.
         this.FindControl<TextBlock>("UdevNoticeDescription")!.Text = coverage.ReadError
             ? "Some udev rules could not be read. Apply these desktop USB permissions if needed, then reconnect your device."
-            : "Huawei USB or VCOM permission rules are missing. Copy and run these commands in a terminal, then reconnect your device.";
+            : !coverage.RulesPresent
+                ? "Huawei USB or VCOM permission rules are missing. Copy and run these commands in a terminal, then reconnect your device."
+                : "The Huawei USB rules are installed, but this session cannot use them yet: "
+                  + string.Join(" ", coverage.Hints);
     }
     private async void CopyUdevCommands_Click(object? sender, RoutedEventArgs e)
     {

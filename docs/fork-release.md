@@ -32,9 +32,9 @@ Huawei-parity build), and presence of `loaders/hisi990/fastboot.ktl` and `libkir
 ```
 
 `Depends` covers glibc, X11/ICE/SM, fontconfig/freetype, libusb, zlib, ICU and OpenSSL. The app tree is
-Qt/GTK-free (Avalonia/Skia). `postinst` reloads udev rules and runs a non-fatal runtime self-check; add
-yourself to `adbusers` on Arch/CachyOS, or `plugdev` + `uucp` on Debian/Ubuntu (the deb rewrites the
-USB rule to `GROUP="plugdev"`), for non-desktop sessions.
+Qt/GTK-free (Avalonia/Skia). `postinst` reloads udev rules and runs a non-fatal runtime self-check.
+The shipped rule is one text on every distro (`GROUP="uucp"` + `TAG+="uaccess"`, no per-package
+rewrite); add yourself to `uucp` for non-desktop (ssh/container/CI) sessions.
 
 ### Dependency policy (ICU / OpenSSL)
 

@@ -72,12 +72,10 @@ if [ -x "$SUITE$APP/KirinTool.Cli" ]; then ln -s "$APP/KirinTool.Cli" "$SUITE/us
 install -Dm644 "$ROOT/packaging/kirin-tool-appimage.desktop" "$SUITE/usr/share/applications/kirin-tool.desktop"
 sed -i 's|^Exec=.*|Exec=kirin-tool|' "$SUITE/usr/share/applications/kirin-tool.desktop"
 install -Dm644 "$ROOT/packaging/kirin-tool.png" "$SUITE/usr/share/pixmaps/kirin-tool.png"
-# Debian/Ubuntu have no "adbusers" group (that is an Arch convention); the USB
-# node rule grants GROUP="adbusers", so a non-logind session (ssh, container, CI)
-# would get "permission denied". Rewrite only the USB rule to plugdev, which
-# exists on every Debian/Ubuntu release; the tty rule already uses uucp.
+# D-22: the rule text is distro-neutral (GROUP="uucp" exists on Debian/Ubuntu and Arch) and is
+# installed verbatim - no per-package rewrite, no second wording. It is the same file the app
+# embeds, so the GUI/CLI instructions and the installed rule cannot drift apart.
 install -Dm644 "$ROOT/packaging/51-kirin-tool-fastboot.rules" "$SUITE/usr/lib/udev/rules.d/51-kirin-tool-fastboot.rules"
-sed -i 's/GROUP="adbusers"/GROUP="plugdev"/' "$SUITE/usr/lib/udev/rules.d/51-kirin-tool-fastboot.rules"
 
 # ---- docs / licenses ----
 [ -d "$SUITE$APP/licenses" ] && cp -a "$SUITE$APP/licenses/." "$SUITE/usr/share/licenses/$PKG/"
@@ -93,12 +91,13 @@ if [ -d /run/systemd/system ] && command -v udevadm >/dev/null 2>&1; then
   udevadm control --reload-rules || true
   udevadm trigger || true
 fi
-# The deb ships the rule with GROUP="plugdev" (see build-deb.sh); add the user
-# to plugdev and uucp for non-desktop sessions. Keep the message non-fatal.
-if ! getent group plugdev >/dev/null 2>&1; then
-  echo "kirin-tool-linux: 提示：未发现 plugdev 组；非桌面会话需自行把 udev 规则里的 GROUP 改成有权限的组。" >&2
-elif ! id -nG 2>/dev/null | grep -qw plugdev; then
-  echo "kirin-tool-linux: 提示：当前用户不在 plugdev 组；无桌面会话时 fastboot 可能无权限（sudo usermod -aG plugdev,uucp \$USER 后重新登录）。" >&2
+# The rule grants GROUP="uucp" (present on Debian/Ubuntu and Arch). Being in that group is what
+# makes it work without a logind session (ssh/container/CI), so say so - non-fatally, and only as
+# a hint: a desktop session gets access from TAG+="uaccess" without any group.
+if ! getent group uucp >/dev/null 2>&1; then
+  echo "kirin-tool-linux: 提示：未发现 uucp 组；非桌面会话需自行把 udev 规则里的 GROUP 改成有权限的组。" >&2
+elif ! id -nG 2>/dev/null | grep -qw uucp; then
+  echo "kirin-tool-linux: 提示：当前用户不在 uucp 组；无桌面会话（ssh/容器/CI）时 fastboot 可能无权限（sudo usermod -aG uucp \$USER 后重新登录）。" >&2
 fi
 
 # Runtime self-check (non-fatal). The app is a self-contained .NET build, but

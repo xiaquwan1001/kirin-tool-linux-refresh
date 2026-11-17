@@ -231,7 +231,7 @@ internal sealed class UdevCommand : ICliCommand
     public string Name => "udev";
     public string McpName => "udev";
     public string Summary => "Check host udev rule coverage for Huawei (12d1) USB/serial access (read-only, no device).";
-    public string Usage => "udev [--json]\n  exit 0 when both usb and tty rules are covered, 5 otherwise (the fix commands are printed)";
+    public string Usage => "udev [--json]\n  exit 0 when both usb and tty rules are covered AND this session can use them, 5 otherwise (fix commands + hints are printed)";
     public bool IsWrite => false;
     public IReadOnlyList<CliParam> Params => Array.Empty<CliParam>();
 
@@ -240,6 +240,7 @@ internal sealed class UdevCommand : ICliCommand
         cancellationToken.ThrowIfCancellationRequested();
         UdevRuleCoverage coverage = UdevRuleNotice.Inspect();
 
+        // D-22: two conclusions - the rule text, and whether this session can use it.
         if (context.Json)
         {
             context.WriteJson(new
@@ -247,10 +248,28 @@ internal sealed class UdevCommand : ICliCommand
                 usb = coverage.Usb,
                 serial = coverage.Serial,
                 readError = coverage.ReadError,
+                rulesPresent = coverage.RulesPresent,
+                sessionAccess = coverage.SessionAccess,
+                worldAccessible = coverage.WorldAccessible,
+                session = coverage.Session is { } session
+                    ? new
+                    {
+                        kind = session.Kind,
+                        logindSession = session.HasLogindSession,
+                        remote = session.IsRemote,
+                        userGroups = session.UserGroups,
+                        ruleGroups = session.RuleGroups,
+                        groupsCovered = session.GroupsCovered,
+                        uaccessUsable = session.DesktopUaccess,
+                        probeFailed = session.ProbeFailed,
+                    }
+                    : null,
+                verdict = coverage.Verdict,
+                hints = coverage.Hints,
                 complete = coverage.Complete,
                 appImage = UdevRuleNotice.IsAppImage,
                 directories = UdevRuleNotice.RuleDirectories,
-                applyCommands = coverage.Complete ? null : UdevRuleNotice.ApplyCommands,
+                applyCommands = coverage.RulesPresent ? null : UdevRuleNotice.ApplyCommands,
                 exitCode = coverage.Complete ? ExitCodes.Ok : ExitCodes.FileOrVerify,
             });
         }
@@ -259,7 +278,14 @@ internal sealed class UdevCommand : ICliCommand
             context.Output.WriteLine($"usb rule (12d1 usb_device): {(coverage.Usb ? "covered" : "MISSING")}");
             context.Output.WriteLine($"serial rule (12d1 tty):      {(coverage.Serial ? "covered" : "MISSING")}");
             if (coverage.ReadError) context.Output.WriteLine("note: at least one rule directory could not be read (permissions)");
-            if (!coverage.Complete)
+            // The session half: static rule text alone used to be reported as "complete" even when
+            // TAG+="uaccess" could not apply (ssh/container/CI) and the user was in no group.
+            if (coverage.Session is { } session)
+                context.Output.WriteLine($"session: {session.Describe()}");
+            context.Output.WriteLine($"verdict: {coverage.Verdict}  (rules present: {coverage.RulesPresent}, session can use them: {coverage.SessionAccess})");
+            foreach (string hint in coverage.Hints)
+                context.Output.WriteLine($"hint: {hint}");
+            if (!coverage.RulesPresent)
             {
                 context.Output.WriteLine();
                 context.Output.WriteLine("run as root to install the vendor-wide rules:");
@@ -268,7 +294,8 @@ internal sealed class UdevCommand : ICliCommand
         }
 
         if (coverage.Complete) return Task.FromResult(ExitCodes.Ok);
-        context.Diag("error: udev rules incomplete - fastboot/adb may need root or a manual udev rule");
+        context.Diag("error: udev access is not usable as-is (" + coverage.Verdict
+                     + ") - fastboot/adb may need root, a group membership or a udev rule");
         return Task.FromResult(ExitCodes.FileOrVerify);
     }
 }
