@@ -44,7 +44,17 @@ SSL_DEPENDS='libssl3t64 | libssl3 | libssl1.1'
 # D-20: the .deb layout assumes loaders/ sits next to the binary (VCOM unlock reads
 # <app>/loaders/<cpu>). Assert it here, where the message can name the actionable cause,
 # instead of letting the installed package report "Loader directory for <cpu> not found".
-"$ROOT/packaging/check-loaders.sh" "$PUBLISH"
+# Escape hatch for CI's *synthetic* publish tree (packaging smoke only): the fake tree carries
+# one placeholder loader, and the real loader inventory is business-licensed so it never lands in
+# a CI artifact. The default stays fail-closed — a real release without loaders/ must not build.
+if ! "$ROOT/packaging/check-loaders.sh" "$PUBLISH"; then
+  if [ "${KIRIN_ALLOW_MISSING_LOADERS:-}" = "1" ]; then
+    echo "⚠ SYNTHETIC PACKAGING SMOKE: loaders/ is incomplete, allowed by KIRIN_ALLOW_MISSING_LOADERS=1." >&2
+    echo "  Only the packaging smoke may set this; a real package would ship a broken VCOM unlock." >&2
+  else
+    exit 1
+  fi
+fi
 if [ -n "$CLI_BINARY" ] && [ ! -x "$CLI_BINARY" ]; then echo "✗ CLI binary not executable: $CLI_BINARY" >&2; exit 1; fi
 
 STAGE="$(mktemp -d)"

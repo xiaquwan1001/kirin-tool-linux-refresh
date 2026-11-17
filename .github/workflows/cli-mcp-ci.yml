@@ -215,7 +215,9 @@ jobs:
           printf '#!/bin/sh\necho fake-cli\n' > cli-fake
           chmod +x "$P/Kirin-Tool" "$P/fastboot/fastboot" "$P/UsbUpdateProbe" "$P/VcomOpenProbe" cli-fake
 
-          ./packaging/build-deb.sh "$P" 0.0.0-ci ./cli-fake dist
+          # The fake tree cannot carry the real (business-licensed) loader inventory, so the
+          # D-20 assertion is explicitly relaxed for this smoke only; release-linux keeps it strict.
+          KIRIN_ALLOW_MISSING_LOADERS=1 ./packaging/build-deb.sh "$P" 0.0.0-ci ./cli-fake dist
 
           DEB="$(ls dist/*.deb)"
           echo "built: $DEB"
