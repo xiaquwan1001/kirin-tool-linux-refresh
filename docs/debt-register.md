@@ -28,6 +28,21 @@
     `Cli/Commands/WriteCommands.TryDetectOemInfoVersion` 只剩「读文件 + 调用」，不再自己扫块。
   断言 `tests/KnowledgeDedup`（44 条：旧规则冻结快照、别名/标记/探测语义、以及「只有一份实现」的源码扫描 +
   「调用点真的调用它」的源码断言，防止扫描空转）。
+- **D-23 → fixed-in-3.1.0**（BB-14/BB-25/BB-29/S34）：GUI 三处隐式步骤变成显式结论：
+  - (a) 写前备份从「恒开且不可见」变成显式选项 `PreOpBackupCheckBox`（Full OTA 面板）+ `UserSettings.PreOpBackup`
+    （默认仍是 **on**，旧 settings.json 无该键时也是 on）。关掉时进度窗给出 `pre-op-backup:disabled-by-user` 提示、
+    `ProcessRunner` 诊断行和会话记录，四条写路径共用 `Services/Verdict/PreOpBackupChoice.cs` 的同一判定；
+    关闭后 `RunPreOpBackupAsync` 在任何设备访问前返回 `PreOpBackupResult.Skipped`（`Attempted=false, Error=disabled`）。
+  - (b) 结论不再只活在一个会被关掉的进度窗里：`Services/Verdict/OperationConclusionRecord.cs` 把
+    `verified/partial/failed/cancelled/timed-out/skipped` 连同原文写进**既有** `sessions/` 会话
+    （`phase=result, step=gui.conclusion, verdictSource=gui:<outcome>`），`logs list|show` 可回顾；GUI 四条写路径的
+    收尾统一走 `CompleteGuiOperation(...)`。日志目录不可写时只丢记录、不影响刷写（catch→null）。
+  - (c) USB Update 新红线分区的二次确认从 `bool` 变三态 `RedlineDeltaOutcome`（`Services/Verdict/RedlineDeltaVerdict.cs`）：
+    `Task.WhenAny` 落到超时臂即 `timed-out`（不是 `declined`），结论文案明确「CANCELLED BY TIMEOUT … NOT a user refusal」
+    并带 `redline-delta:timed-out` token，同时按 `OperationOutcome.TimedOut` 进会话记录；10 分钟上界未变。
+  断言 `tests/GuiQol` D-23a/b/c 三段（headless：勾选框默认勾选、取消勾选后持久化 + 警告可见 + 备份返回 Skipped；
+  会话行内容与 `logs list` 可见性；三态映射/文案互斥 + `MainWindow.axaml.cs` 源码确认漏斗真的在用）。
+  `tests/StableParity/boundary.json` 的 `MainWindow.axaml.cs` hash 已刷新，`reference` 写明理由（wire 命令/时序/重试未变）。
 - 验证：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 全量 rc=0。
 
 
@@ -183,7 +198,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-20 | P15 | `packaging/publish.sh` 不产出 `loaders/`，但 deb/AppRun 假定它存在 → 打包产物里 VCOM 解锁会报 `Loader directory for <cpu> not found` | open | `packaging/build-deb.sh:5`、`packaging/AppRun:3`（注释假定），`packaging/publish.sh` 内无 `loaders` 拷贝 |
 | D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | **fixed-in-3.1.0** | `Cli/Mcp/McpProtocol.cs:36-95`（版本常量唯一出处 + `Negotiate`：echoed/fallback/defaulted）、`Cli/Mcp/McpServer.cs:112-160`（`Initialize(parameters, log)` 协商 + `protocolNegotiation` 字段 + stderr 失配告警）；`tests/McpProtocol` 34 条（含「版本字面量只允许一处」源码扫描） |
 | D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
-| D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | open | GUI 备份调用点见审计原文；超时分支 `Task.WhenAny(..., Task.Delay(10min))`（S34 同源） |
+| D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | **fixed-in-3.1.0**（a/b/c；「路径过长只 warn」仍是 warn，未改） | (a) `Services/Verdict/PreOpBackupChoice.cs` + `MainWindow.axaml.cs`（`HookPreOpBackupOption`/`RunPreOpBackupAsync` 前置判定）+ `MainWindow.axaml` 勾选框 + `Services/UserSettings.cs`（`pre_op_backup`，默认 true）；(b) `Services/Verdict/OperationConclusionRecord.cs` + `MainWindow.axaml.cs` `CompleteGuiOperation`（XML/Full OTA/USB Update/rescue 四处收尾）；(c) `Services/Verdict/RedlineDeltaVerdict.cs`（`FromAnswer`/`Describe`，`Timeout=10min`）+ `ConfirmRedlineDeltaOnBackground`。`tests/GuiQol` D-23a/b/c 共 30 条断言（headless + 会话文件 + 源码扫描） |
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | open | `Models/FrpBypassResult.cs:34`；`Models/EnableDowngradeResult.cs:37` |
 | D-25 | S28 / S23 / S25 / S31 / S33 | 失败与「不支持」「超时」仍不可区分：`TryReadAsync` 三连 catch→null、诊断日志三层空 catch、`IsDeviceConnected` 吞异常返回 false、设置损坏静默改名 `.bad`、sysfs 读失败→null | open | `Cli/CommandSupport.cs:57-93`；`Utils/ProcessRunner.cs:221-264`；`Services/FastbootClient.cs:53-65`；`Services/UserSettings.cs:341-375`；`Utils/LinuxSerialPortFinder.cs:144-158` |
 | D-26 | H93 / H09 | 需要拔插线/需要关写保护的 SoC 名单仍有 4 份拷贝 | open | `Services/FirmwareUnlocker.cs:118-141`；`MainWindow.axaml.cs:2491-2492,2521-2524`；`Services/VcomFlasher.cs:213-247` |

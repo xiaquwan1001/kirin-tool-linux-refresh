@@ -191,6 +191,9 @@ namespace Kirin_Tool
             SetupEventHandlers();
             InitializeFullOta();
             HookUserSettingsPersistence();
+            // D-23(a): the pre-op backup is a visible, reversible option, restored before the
+            // window can start a write (the default stays "on").
+            HookPreOpBackupOption();
             RestoreUserSettings();
 
             ShowWelcomePage();
@@ -605,7 +608,7 @@ namespace Kirin_Tool
                     return await FlashPartitionsWithProgress(selectedPartitions, progressDialog, cancellationTokenSource.Token, skipSecure, allowRedline);
                 }, cancellationTokenSource.Token);
 
-                progressDialog.SetOverallComplete(flashResult.IsSuccess, flashResult.Message);
+                CompleteGuiOperation(progressDialog, "gui-xml", OperationConclusionRecord.FromSuccess(flashResult.IsSuccess), flashResult.Message);
 
                 while (!dialogClosed)
                 {
@@ -626,11 +629,11 @@ namespace Kirin_Tool
             }
             catch (OperationCanceledException)
             {
-                progressDialog.SetOverallComplete(false, "Flash operation was cancelled by user");
+                CompleteGuiOperation(progressDialog, "gui-xml", OperationOutcome.Cancelled, "Flash operation was cancelled by user");
             }
             catch (Exception ex)
             {
-                progressDialog.SetOverallComplete(false, $"Flash failed: {ex.Message}");
+                CompleteGuiOperation(progressDialog, "gui-xml", OperationOutcome.Failed, $"Flash failed: {ex.Message}");
             }
         }
 
@@ -735,13 +738,56 @@ namespace Kirin_Tool
         }
 
         /// <summary>
+        /// D-23(a) / audit BB-14: wires the visible pre-op backup option. The checkbox reflects
+        /// <see cref="UserSettings.PreOpBackup"/> (default on); turning it off shows an explicit
+        /// warning, writes the decision into the operation log, and is undone by re-checking it.
+        /// </summary>
+        private void HookPreOpBackupOption()
+        {
+            PreOpBackupCheckBox.IsChecked = PreOpBackupChoice.ShouldRun(UserSettings.PreOpBackup);
+            UpdatePreOpBackupNotice(PreOpBackupCheckBox.IsChecked == true);
+
+            PreOpBackupCheckBox.IsCheckedChanged += (_, _) =>
+            {
+                if (_restoringUserSettings) return;
+                bool enabled = PreOpBackupCheckBox.IsChecked == true;
+                UserSettings.PreOpBackup = enabled;
+                UpdatePreOpBackupNotice(enabled);
+                ProcessRunner.WriteDiagnostic("PreOpBackup", PreOpBackupChoice.DecisionRecord("gui-settings", enabled));
+                OperationConclusionRecord.Record("gui-settings", OperationOutcome.Verified,
+                    PreOpBackupChoice.DecisionRecord("gui-settings", enabled));
+            };
+        }
+
+        /// <summary>Shows or hides the "you turned the backup off" warning next to the checkbox.</summary>
+        private void UpdatePreOpBackupNotice(bool enabled)
+        {
+            PreOpBackupDisabledNotice.IsVisible = !PreOpBackupChoice.ShouldRun(enabled);
+        }
+
+        /// <summary>
         /// Best-effort pre-op backup (redline members of the write plan + ptable) run
         /// before every real GUI write path. Dump failures only surface as a progress/
         /// status line — the write itself is never blocked (strict mode is CLI-only).
+        ///
+        /// D-23(a): the step is now governed by <see cref="PreOpBackupChoice"/>: when the user
+        /// turned the option off it is skipped loudly (progress line + diagnostic + session
+        /// record), never silently. The default is unchanged, so nothing changes for anyone who
+        /// does not touch the checkbox.
         /// </summary>
         private async Task<PreOpBackupResult?> RunPreOpBackupAsync(
             IEnumerable<string> partitionNames, string trigger, ProcessDialogUapp? progressDialog = null)
         {
+            if (!PreOpBackupChoice.ShouldRun(UserSettings.PreOpBackup))
+            {
+                string notice = PreOpBackupChoice.DisabledNotice(trigger);
+                ProcessRunner.WriteDiagnostic("PreOpBackup", notice);
+                SetProgressDialogOperation(progressDialog, notice);
+                OperationConclusionRecord.Record("gui-pre-op-backup", OperationOutcome.Skipped,
+                    PreOpBackupChoice.DecisionRecord(trigger, enabled: false));
+                return PreOpBackupResult.Skipped;
+            }
+
             try
             {
                 SetProgressDialogOperation(progressDialog, "Backing up identity partitions (pre-op backup)...");
@@ -780,6 +826,19 @@ namespace Kirin_Tool
         {
             if (dialog == null) return;
             Dispatcher.UIThread.InvokeAsync(() => { dialog.CurrentOperationText = message; });
+        }
+
+        /// <summary>
+        /// D-23(b) / audit BB-25 + BB-29: the conclusion of a GUI write is not only the last line
+        /// of a modal window. Every completion goes through here: it shows the message (unchanged
+        /// behaviour) and records the same conclusion in the operation session
+        /// (<see cref="OperationConclusionRecord"/>), so `logs list|show` can answer "what did that
+        /// flash actually conclude" after the window is gone.
+        /// </summary>
+        private void CompleteGuiOperation(ProcessDialogUapp? dialog, string operation, OperationOutcome outcome, string message)
+        {
+            dialog?.SetOverallComplete(OperationConclusionRecord.IsSuccess(outcome), message);
+            OperationConclusionRecord.Record(operation, outcome, message);
         }
 
         public bool ShowFullOtaWarning
@@ -1112,16 +1171,23 @@ namespace Kirin_Tool
                     var newRedlineHits = RedlinePartitionHits(partitions.Select(p => p.PartitionName))
                         .Where(name => !redlinePreScan.Contains(name, StringComparer.OrdinalIgnoreCase))
                         .ToList();
-                    if (newRedlineHits.Count > 0 &&
-                        !ConfirmRedlineDeltaOnBackground(newRedlineHits, "The USB Update flash (partitions discovered after unpacking)"))
+                    if (newRedlineHits.Count > 0)
                     {
-                        // Declined (or timed out): cancel before any write happens; the
-                        // service throws on the token right after its redline gate.
-                        cancellationTokenSource.Cancel();
-                        Dispatcher.UIThread.InvokeAsync(() =>
-                            flashDialog.SetOverallComplete(false,
-                                "USB Update flash aborted: newly discovered redline partition(s) were not confirmed: " +
-                                string.Join(", ", newRedlineHits)));
+                        RedlineDeltaOutcome delta = ConfirmRedlineDeltaOnBackground(
+                            newRedlineHits, "The USB Update flash (partitions discovered after unpacking)");
+                        if (!RedlineDeltaVerdict.AllowsWrite(delta))
+                        {
+                            // Declined and timed out are different conclusions (D-23c): both cancel
+                            // before any write, but the message says which one happened, and the
+                            // conclusion is recorded rather than shown once in a closing window.
+                            string conclusion = RedlineDeltaVerdict.Describe(delta, newRedlineHits);
+                            OperationOutcome recordedOutcome = delta == RedlineDeltaOutcome.TimedOut
+                                ? OperationOutcome.TimedOut
+                                : OperationOutcome.Cancelled;
+                            OperationConclusionRecord.Record("gui-usb-update", recordedOutcome, conclusion);
+                            cancellationTokenSource.Cancel();
+                            Dispatcher.UIThread.InvokeAsync(() => flashDialog.SetOverallComplete(false, conclusion));
+                        }
                     }
                 };
 
@@ -1146,25 +1212,25 @@ namespace Kirin_Tool
                 // failed one (nothing written) are both failures of the operation's goal.
                 if (verdict.Verified)
                 {
-                    flashDialog.SetOverallComplete(true, "USB Update flash verified — " + verdict.Describe());
+                    CompleteGuiOperation(flashDialog, "gui-usb-update", OperationOutcome.Verified, "USB Update flash verified — " + verdict.Describe());
                 }
                 else if (verdict.Outcome == UsbUpdateOutcome.Partial)
                 {
-                    flashDialog.SetOverallComplete(false, "USB Update flash PARTIAL — " + verdict.Describe());
+                    CompleteGuiOperation(flashDialog, "gui-usb-update", OperationOutcome.Partial, "USB Update flash PARTIAL — " + verdict.Describe());
                 }
                 else
                 {
-                    flashDialog.SetOverallComplete(false, "USB Update flash FAILED — " + verdict.Describe());
+                    CompleteGuiOperation(flashDialog, "gui-usb-update", OperationOutcome.Failed, "USB Update flash FAILED — " + verdict.Describe());
                 }
             }
             catch (OperationCanceledException)
             {
-                flashDialog.SetOverallComplete(false, "USB Update flash was cancelled by user");
+                CompleteGuiOperation(flashDialog, "gui-usb-update", OperationOutcome.Cancelled, "USB Update flash was cancelled by user");
             }
             catch (Exception ex)
             {
                 string errorMsg = $"USB Update flash failed: {ex.Message}";
-                flashDialog.SetOverallComplete(false, errorMsg);
+                CompleteGuiOperation(flashDialog, "gui-usb-update", OperationOutcome.Failed, errorMsg);
             }
             finally
             {
@@ -1292,7 +1358,7 @@ namespace Kirin_Tool
                     return await FlashFullOtaPartitions(allPartitions, flashDialog, cancellationTokenSource.Token, allowRedline);
                 }, cancellationTokenSource.Token);
 
-                flashDialog.SetOverallComplete(flashResult.IsSuccess, flashResult.Message);
+                CompleteGuiOperation(flashDialog, "gui-full-ota", OperationConclusionRecord.FromSuccess(flashResult.IsSuccess), flashResult.Message);
 
                 while (!dialogClosed)
                 {
@@ -1313,11 +1379,11 @@ namespace Kirin_Tool
             }
             catch (OperationCanceledException)
             {
-                flashDialog.SetOverallComplete(false, "OTA flash was cancelled by user");
+                CompleteGuiOperation(flashDialog, "gui-full-ota", OperationOutcome.Cancelled, "OTA flash was cancelled by user");
             }
             catch (Exception ex)
             {
-                flashDialog.SetOverallComplete(false, $"OTA flash failed: {ex.Message}");
+                CompleteGuiOperation(flashDialog, "gui-full-ota", OperationOutcome.Failed, $"OTA flash failed: {ex.Message}");
             }
         }
 
@@ -1941,9 +2007,14 @@ namespace Kirin_Tool
         /// <summary>
         /// Runs the redline confirmation for a diff computed on a worker thread (the USB
         /// Update post-discovery callback) and blocks that worker until the UI answers.
-        /// Returns false on decline or timeout so the caller can cancel before any write.
+        ///
+        /// D-23(c) / audit S34: the answer is a three-state <see cref="RedlineDeltaOutcome"/>,
+        /// not a bool. "The dialog was never answered inside the bounded wait" used to be
+        /// indistinguishable from "the user said no": both cancelled silently. A timeout is now
+        /// reported as <see cref="RedlineDeltaOutcome.TimedOut"/>, so the caller can print an
+        /// explicit "cancelled by timeout" conclusion and record it.
         /// </summary>
-        private bool ConfirmRedlineDeltaOnBackground(List<string> newRedlineHits, string operation)
+        private RedlineDeltaOutcome ConfirmRedlineDeltaOnBackground(List<string> newRedlineHits, string operation)
         {
             var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             Dispatcher.UIThread.Post(async () =>
@@ -1958,8 +2029,14 @@ namespace Kirin_Tool
 
             // Bounded wait: if the dialog can never be answered, abort instead of
             // deadlocking the flash worker thread.
-            var completed = Task.WhenAny(answer.Task, Task.Delay(TimeSpan.FromMinutes(10))).GetAwaiter().GetResult();
-            return completed == answer.Task && answer.Task.Result;
+            var completed = Task.WhenAny(answer.Task, Task.Delay(RedlineDeltaVerdict.Timeout)).GetAwaiter().GetResult();
+            bool answered = completed == answer.Task;
+            RedlineDeltaOutcome outcome = RedlineDeltaVerdict.FromAnswer(answered, answered && answer.Task.Result);
+
+            ProcessRunner.WriteDiagnostic("RedlineDelta",
+                RedlineDeltaVerdict.Token(outcome) + ": " +
+                RedlineDeltaVerdict.Describe(outcome, newRedlineHits));
+            return outcome;
         }
 
         private async Task HandleFrpRemove()
@@ -2343,16 +2420,16 @@ namespace Kirin_Tool
                     switch (ClassifyUsbUpdateModeEntry(finalResult))
                     {
                         case ModeEntryOutcome.Entered:
-                            progressDialog.SetOverallComplete(true,
+                            CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Verified,
                                 "Rescue partitions flashed and the loader confirmed the USB Update mode entry (OKAY/SUCCESS).");
                             break;
                         case ModeEntryOutcome.Failed:
-                            progressDialog.SetOverallComplete(false,
+                            CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Partial,
                                 "Rescue partitions flashed, but the loader refused the USB Update mode entry. " +
                                 $"Last output: {OutputTail(finalResult)}");
                             break;
                         default:
-                            progressDialog.SetOverallComplete(false,
+                            CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Partial,
                                 "Rescue partitions flashed, but the USB Update mode entry is NOT confirmed: the loader printed " +
                                 $"neither OKAY/SUCCESS nor an error. Last output: {OutputTail(finalResult)}");
                             break;
@@ -2360,7 +2437,7 @@ namespace Kirin_Tool
                 }
                 else
                 {
-                    progressDialog.SetOverallComplete(false, "Failed to prepare or flash rescue partitions.");
+                    CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Failed, "Failed to prepare or flash rescue partitions.");
                 }
 
                 while (!dialogClosed)
@@ -2371,11 +2448,11 @@ namespace Kirin_Tool
             }
             catch (OperationCanceledException)
             {
-                progressDialog.SetOverallComplete(false, "Operation cancelled by user.");
+                CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Cancelled, "Operation cancelled by user.");
             }
             catch (Exception ex)
             {
-                progressDialog.SetOverallComplete(false, $"Error: {ex.Message}");
+                CompleteGuiOperation(progressDialog, "gui-rescue", OperationOutcome.Failed, $"Error: {ex.Message}");
             }
             finally
             {

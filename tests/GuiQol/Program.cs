@@ -205,6 +205,169 @@ Dispatcher.UIThread.RunJobs();
     Console.WriteLine("PASS D-05 skipped partitions are reported separately and never counted as successes");
 }
 
+// D-23 (a): the pre-op backup is an explicit, reversible option whose default did not change.
+{
+    Check(Kirin_Tool.Services.Verdict.PreOpBackupChoice.DefaultEnabled &&
+          Kirin_Tool.Services.Verdict.PreOpBackupChoice.ShouldRun(true),
+        "D-23a: the pre-op backup still runs by default");
+    Check(!Kirin_Tool.Services.Verdict.PreOpBackupChoice.ShouldRun(false),
+        "D-23a: turning the option off really skips the backup");
+
+    string disabledNotice = Kirin_Tool.Services.Verdict.PreOpBackupChoice.DisabledNotice("gui-full-ota");
+    Check(disabledNotice.Contains(Kirin_Tool.Services.Verdict.PreOpBackupChoice.DisabledToken, StringComparison.Ordinal) &&
+          disabledNotice.Contains("restored", StringComparison.Ordinal) &&
+          disabledNotice.Contains("gui-full-ota", StringComparison.Ordinal),
+        "D-23a: the notice names the token, the consequence and the write path");
+    Check(Kirin_Tool.Services.Verdict.PreOpBackupChoice.DecisionRecord("gui-full-ota", false)
+            .Contains(Kirin_Tool.Services.Verdict.PreOpBackupChoice.DisabledToken, StringComparison.Ordinal),
+        "D-23a: the session record says the backup was turned off");
+
+    var preOpConfig = NewConfigDirectory("preop-backup");
+    UserSettings.Initialize(preOpConfig);
+    Check(UserSettings.PreOpBackup, "D-23a: a fresh settings file keeps the backup on");
+    File.WriteAllText(Path.Combine(preOpConfig, "settings.json"), "{\"theme\":\"dark\"}");
+    UserSettings.Initialize(preOpConfig);
+    Check(UserSettings.PreOpBackup && UserSettings.Theme == "dark",
+        "D-23a: an existing settings.json without the key keeps the backup on");
+    UserSettings.PreOpBackup = false;
+    UserSettings.Initialize(preOpConfig);
+    Check(!UserSettings.PreOpBackup, "D-23a: turning it off survives a reload");
+    Check(File.ReadAllText(UserSettings.SettingsFilePath).Contains("pre_op_backup", StringComparison.Ordinal),
+        "D-23a: the option is stored under a snake_case key");
+    UserSettings.PreOpBackup = true;
+
+    string logRoot = Path.Combine(Path.GetTempPath(), "kirin-guiqol-log-" + Guid.NewGuid().ToString("N")[..8]);
+    Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", logRoot);
+    Kirin_Tool.Services.Diagnostics.OperationLogger.ResetSessionForTests();
+    unhandled = null;
+    var preOpWindow = new MainWindow();
+    preOpWindow.Show();
+    Dispatcher.UIThread.RunJobs();
+    var preOpBox = preOpWindow.FindControl<CheckBox>("PreOpBackupCheckBox")
+        ?? throw new Exception("D-23a: the pre-op backup checkbox is missing from the Full OTA panel");
+    var preOpWarning = preOpWindow.FindControl<TextBlock>("PreOpBackupDisabledNotice")
+        ?? throw new Exception("D-23a: the pre-op backup warning is missing");
+    Check(preOpBox.IsChecked == true, "D-23a: the option is visible and checked by default");
+    Check(!preOpWarning.IsVisible, "D-23a: no warning while the backup is on");
+
+    preOpBox.IsChecked = false;
+    Dispatcher.UIThread.RunJobs();
+    Check(!UserSettings.PreOpBackup && preOpWarning.IsVisible,
+        "D-23a: unchecking it persists the choice and raises the on-screen warning");
+
+    // The four write paths ask the same question; with the option off the backup returns the
+    // Skipped result before any fastboot/serial access (the injected clients answer nothing).
+    var runBackup = typeof(MainWindow).GetMethod("RunPreOpBackupAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+        ?? throw new Exception("D-23a: RunPreOpBackupAsync is missing");
+    Task backupTask = (Task)runBackup.Invoke(preOpWindow, new object?[] { new[] { "boot" }, "gui-test", null })!;
+    backupTask.GetAwaiter().GetResult();
+    var skipped = (Kirin_Tool.Services.PreOpBackupResult?)backupTask.GetType().GetProperty("Result")!.GetValue(backupTask);
+    Check(skipped != null && !skipped.Attempted && skipped.Error == "disabled",
+        "D-23a: with the option off the backup is skipped explicitly (Attempted=false, Error=disabled)");
+
+    preOpBox.IsChecked = true;
+    Dispatcher.UIThread.RunJobs();
+    Check(UserSettings.PreOpBackup && !preOpWarning.IsVisible, "D-23a: re-checking it restores the safe default");
+    preOpWindow.Close();
+    Dispatcher.UIThread.RunJobs();
+    Check(unhandled is null, "D-23a: the option added no UI exception");
+    Console.WriteLine("PASS D-23a pre-op backup is a visible option with an unchanged safe default");
+}
+
+// D-23 (b): the conclusion is a reviewable record, not only a progress line.
+{
+    Check(Kirin_Tool.Services.Verdict.OperationConclusionRecord.VerdictOf(Kirin_Tool.Services.Verdict.OperationOutcome.Verified) == "verified" &&
+          Kirin_Tool.Services.Verdict.OperationConclusionRecord.VerdictOf(Kirin_Tool.Services.Verdict.OperationOutcome.Partial) == "partial" &&
+          Kirin_Tool.Services.Verdict.OperationConclusionRecord.VerdictOf(Kirin_Tool.Services.Verdict.OperationOutcome.Failed) == "failed" &&
+          Kirin_Tool.Services.Verdict.OperationConclusionRecord.VerdictOf(Kirin_Tool.Services.Verdict.OperationOutcome.Cancelled) == "cancelled" &&
+          Kirin_Tool.Services.Verdict.OperationConclusionRecord.VerdictOf(Kirin_Tool.Services.Verdict.OperationOutcome.TimedOut) == "timed-out",
+        "D-23b: each outcome has its own verdict word");
+    Check(Kirin_Tool.Services.Verdict.OperationConclusionRecord.IsSuccess(Kirin_Tool.Services.Verdict.OperationOutcome.Verified) &&
+          !Kirin_Tool.Services.Verdict.OperationConclusionRecord.IsSuccess(Kirin_Tool.Services.Verdict.OperationOutcome.Partial),
+        "D-23b: a partial flash is never recorded as a success");
+    Check(Kirin_Tool.Services.Verdict.OperationConclusionRecord.FromSuccess(false) == Kirin_Tool.Services.Verdict.OperationOutcome.Failed &&
+          Kirin_Tool.Services.Verdict.OperationConclusionRecord.FromSuccess(true) == Kirin_Tool.Services.Verdict.OperationOutcome.Verified,
+        "D-23b: legacy bool conclusions map onto the same enum");
+
+    string logRoot = Path.Combine(Path.GetTempPath(), "kirin-guiqol-log-" + Guid.NewGuid().ToString("N")[..8]);
+    Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", logRoot);
+    Kirin_Tool.Services.Diagnostics.OperationLogger.ResetSessionForTests();
+
+    // ASCII only: the JSONL writer escapes non-ASCII, so a dash in the fixture would make the
+    // Contains() below tire-kick the encoder instead of the record.
+    const string message = "OTA flash PARTIAL - 3/4 partitions verified";
+    string? sessionDirectory = Kirin_Tool.Services.Verdict.OperationConclusionRecord.Record(
+        "gui-full-ota", Kirin_Tool.Services.Verdict.OperationOutcome.Partial, message);
+    Check(sessionDirectory != null && Directory.Exists(sessionDirectory),
+        "D-23b: the conclusion is written into the existing sessions/ store (no new storage)");
+    string jsonlPath = Path.Combine(sessionDirectory!, "session.jsonl");
+    Check(File.Exists(jsonlPath), "D-23b: session.jsonl exists");
+    string jsonl = File.ReadAllText(jsonlPath);
+    Check(jsonl.Contains("gui.conclusion", StringComparison.Ordinal) &&
+          jsonl.Contains("gui:partial", StringComparison.Ordinal) &&
+          jsonl.Contains(message, StringComparison.Ordinal),
+        "D-23b: the recorded line carries the step, the verdict source and the message");
+
+    var listed = Kirin_Tool.Services.Diagnostics.LogSessionStore.List(logRoot);
+    Check(listed.Any(descriptor => Path.GetFullPath(descriptor.Directory) == Path.GetFullPath(sessionDirectory!)),
+        "D-23b: logs list sees the GUI conclusion (the record is reviewable)");
+
+    // A broken log root must degrade to "no record", never to a crash after a finished write.
+    Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", jsonlPath);
+    Kirin_Tool.Services.Diagnostics.OperationLogger.ResetSessionForTests();
+    Check(Kirin_Tool.Services.Verdict.OperationConclusionRecord.Record(
+            "gui-full-ota", Kirin_Tool.Services.Verdict.OperationOutcome.Failed, "boom") is null,
+        "D-23b: an unwritable log root yields no record instead of breaking the operation");
+    Environment.SetEnvironmentVariable("KIRIN_LOG_DIR", null);
+    Kirin_Tool.Services.Diagnostics.OperationLogger.ResetSessionForTests();
+    Console.WriteLine("PASS D-23b GUI conclusions land in the shared operation session");
+}
+
+// D-23 (c): a timeout is its own conclusion, never "the user said no".
+{
+    Check(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.FromAnswer(true, true) == Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Approved,
+        "D-23c: an answered yes is Approved");
+    Check(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.FromAnswer(true, false) == Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Declined,
+        "D-23c: an answered no is Declined");
+    Check(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.FromAnswer(false, false) == Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.TimedOut &&
+          Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.FromAnswer(false, true) == Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.TimedOut,
+        "D-23c: an unanswered confirmation is TimedOut, whatever the answer task would have said");
+    Check(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.AllowsWrite(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Approved) &&
+          !Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.AllowsWrite(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Declined) &&
+          !Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.AllowsWrite(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.TimedOut),
+        "D-23c: only an explicit approval lets the write continue");
+
+    string[] names = { "boot", "vbmeta" };
+    string declined = Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.Describe(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Declined, names);
+    string timedOut = Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.Describe(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.TimedOut, names);
+    string approved = Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.Describe(Kirin_Tool.Services.Verdict.RedlineDeltaOutcome.Approved, names);
+    Check(declined.Contains("DECLINED", StringComparison.Ordinal) &&
+          declined.Contains(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.DeclinedToken, StringComparison.Ordinal),
+        "D-23c: a refusal says DECLINED and carries its own token");
+    Check(timedOut.Contains("TIMEOUT", StringComparison.Ordinal) &&
+          timedOut.Contains(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.TimedOutToken, StringComparison.Ordinal) &&
+          timedOut.Contains("NOT a user refusal", StringComparison.Ordinal),
+        "D-23c: a timeout says TIMEOUT and states that it is not a refusal");
+    Check(!declined.Contains("TIMEOUT", StringComparison.Ordinal) && declined != timedOut,
+        "D-23c: the two conclusions are textually distinct");
+    Check(approved.Contains(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.ApprovedToken, StringComparison.Ordinal),
+        "D-23c: an approval carries its own token");
+    Check(timedOut.Contains("boot", StringComparison.Ordinal) && timedOut.Contains("vbmeta", StringComparison.Ordinal),
+        "D-23c: the conclusion names the partitions that were never confirmed");
+    Check(Kirin_Tool.Services.Verdict.RedlineDeltaVerdict.Timeout == TimeSpan.FromMinutes(10),
+        "D-23c: the bounded wait is still the historical ten minutes");
+
+    // The GUI funnel must actually use the three-state mapping (a green pure function nobody calls
+    // would leave the silent-cancel bug in place).
+    string mainWindow = File.ReadAllText(Path.Combine(RepositoryRoot(), "MainWindow.axaml.cs"));
+    Check(mainWindow.Contains("RedlineDeltaVerdict.FromAnswer(", StringComparison.Ordinal) &&
+          mainWindow.Contains("RedlineDeltaVerdict.Describe(", StringComparison.Ordinal),
+        "D-23c: ConfirmRedlineDeltaOnBackground returns the three-state outcome via the shared rule");
+    Check(mainWindow.Contains("OperationOutcome.TimedOut", StringComparison.Ordinal),
+        "D-23c: the timeout conclusion is recorded as timed-out, not as a cancellation/refusal");
+    Console.WriteLine("PASS D-23c redline re-confirmation distinguishes timeout from refusal");
+}
+
 Console.WriteLine("8 GUI QoL checks passed; headless, no device access.");
 return 0;
 
@@ -259,4 +422,13 @@ static double Channel(byte value)
 {
     var v = value / 255.0;
     return v <= 0.03928 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4);
+}
+
+// Source assertions (D-23c) need the repository root, not the test's output directory.
+static string RepositoryRoot()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory != null && !File.Exists(Path.Combine(directory.FullName, "Kirin-Tool.csproj")))
+        directory = directory.Parent;
+    return directory?.FullName ?? throw new Exception("repository root not found from " + AppContext.BaseDirectory);
 }
