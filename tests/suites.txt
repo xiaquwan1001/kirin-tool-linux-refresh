@@ -27,3 +27,6 @@ VcomUnlockCli
 ApprovalGate
 VerdictHonesty
 VersionMetadata
+BatteryGate
+PwnJumpTable
+DloadSentinel

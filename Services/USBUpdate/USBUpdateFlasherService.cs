@@ -109,7 +109,9 @@ namespace Kirin_Tool.Services.USBUpdate
 
             // Was an empty catch: the directory is deleted exactly as before (a failure still lets
             // the caller continue and recreate it), but the listing and the failure are recorded.
-            OpLog.CleanDirectory(_dloadDirectory, OpNames.UsbUpdateCleanup);
+            // D-14: sentinel-gated cleanup (same rule as SoftwareTestpointService): only a
+            // directory this workflow created (or an empty one) is deleted recursively.
+            DloadDirectoryCleaner.Clean(_dloadDirectory, _log, OpNames.UsbUpdateCleanup);
             Directory.CreateDirectory(_dloadDirectory);
 
             var sw = Stopwatch.StartNew();
