@@ -20,6 +20,7 @@
 
 using Kirin_Tool.Models;
 using Kirin_Tool.Services.Diagnostics;
+using Kirin_Tool.Services.Verdict;
 using Kirin_Tool.Utils;
 using System;
 using System.Diagnostics;
@@ -111,23 +112,37 @@ namespace Kirin_Tool.Services
         /// </summary>
         public async Task<bool> IsDeviceConnected()
         {
+            ReadOutcome<bool> probe = await ProbeConnectionAsync();
+            return probe.Succeeded && probe.Value;
+        }
+
+        /// <summary>
+        /// D-25 (audit S25): the same probe as <see cref="IsDeviceConnected"/>, but it says *why* there
+        /// is no answer. A <c>bool</c> cannot distinguish "the phone is not in fastboot mode" (exit 2,
+        /// a user action) from "fastboot exited non-zero" or "the probe timed out" (exit 1, an
+        /// environment finding) — the CLI used to report all three as "no device".
+        /// The classification itself is pure (<see cref="ConnectionProbe"/>) so it is assertable
+        /// without a device.
+        /// </summary>
+        public async Task<ReadOutcome<bool>> ProbeConnectionAsync()
+        {
+            ProcessResult result;
             try
             {
-                var result = await ProcessRunner.RunAsync(_fastbootPath, "devices", op: "fastboot.devices");
-                if (!result.IsSuccess) return false;
-
-                string? pinned = DeviceSerial.Resolve();
-                return result.Output
-                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                    .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                    .Any(columns => columns.Length >= 2 &&
-                        string.Equals(columns[1], "fastboot", StringComparison.OrdinalIgnoreCase) &&
-                        (pinned == null || string.Equals(columns[0], pinned, StringComparison.OrdinalIgnoreCase)));
+                result = await ProcessRunner.RunAsync(_fastbootPath, "devices", op: "fastboot.devices");
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return false;
+                ReadOutcome<bool> failed = ConnectionProbe.Classify(null, ex, DeviceSerial.Resolve());
+                ProcessRunner.WriteDiagnostic("FastbootClient",
+                    "probe fastboot devices -> " + failed.Describe());
+                return failed;
             }
+
+            ReadOutcome<bool> outcome = ConnectionProbe.Classify(result, null, DeviceSerial.Resolve());
+            if (!outcome.Succeeded)
+                ProcessRunner.WriteDiagnostic("FastbootClient", "probe fastboot devices -> " + outcome.Describe());
+            return outcome;
         }
 
         /// <summary>

@@ -31,7 +31,22 @@ namespace Kirin_Tool.Models
         public bool Step3Success { get; set; }
         public string Step3Output { get; set; } = "";
 
-        public bool OverallSuccess => Step1Success || Step2Success || Step3Success;
+        /// <summary>
+        /// D-24 (audit S21): true only when <b>every</b> step succeeded.
+        ///
+        /// This used to be <c>OverallSuccess = Step1Success || Step2Success || Step3Success</c>, i.e.
+        /// "one of the three erases went through" was reported as "FRP bypassed". Nothing calls it
+        /// today (the CLI/MCP/GUI all read <see cref="SuccessfulStepsCount"/>), which is exactly why
+        /// it was a trap: the next caller would have taken the honest-sounding name at face value.
+        /// The OR aggregate is deliberately <b>not</b> provided under any other name — a caller that
+        /// wants partial progress has to name it (<see cref="SuccessfulStepsCount"/>,
+        /// <see cref="AllStepsFailed"/>, <see cref="HasFailure"/>). Asserted by
+        /// <c>tests/WriteGates</c> §15: two steps OK + one step failed is not a success.
+        /// </summary>
+        public bool AllStepsSucceeded => Step1Success && Step2Success && Step3Success;
+
+        /// <summary>At least one step did not succeed (the complement of <see cref="AllStepsSucceeded"/>).</summary>
+        public bool HasFailure => !AllStepsSucceeded;
 
         public bool AllStepsFailed => !Step1Success && !Step2Success && !Step3Success;
 

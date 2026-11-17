@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
+using Kirin_Tool.Services.Verdict;
 
 namespace Kirin_Tool.Utils
 {
@@ -183,21 +184,40 @@ namespace Kirin_Tool.Utils
             return string.Join(" ", values);
         }
 
-        private static string? ReadAttribute(DirectoryInfo directory, string attribute)
+        /// <summary>
+        /// D-25 (audit S31): read one sysfs attribute without flattening "the attribute does not
+        /// exist here" and "reading it failed" into the same <c>null</c>. The old code returned null
+        /// from two catches and one missing-file branch, so a permissions or IO problem on sysfs made
+        /// the finder report "no matching port" — the same answer as a device that is not plugged in.
+        ///
+        /// <paramref name="read"/> is only injected by the offline tests (a thrower for the failure
+        /// branch); production passes <see cref="File.ReadAllText(string)"/>.
+        /// </summary>
+        public static ReadOutcome<string> TryReadAttribute(string path, Func<string, string?>? read = null)
         {
+            read ??= File.ReadAllText;
             try
             {
-                string path = Path.Combine(directory.FullName, attribute);
-                return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+                if (!File.Exists(path))
+                    return ReadOutcome<string>.Unsupported("sysfs attribute absent: " + path);
+                string? value = read(path);
+                if (string.IsNullOrWhiteSpace(value))
+                    return ReadOutcome<string>.Unsupported("sysfs attribute empty: " + path);
+                return ReadOutcome<string>.Ok(value!.Trim());
             }
-            catch (IOException)
+            catch (Exception ex)
             {
-                return null;
+                return ReadOutcomes.FromException<string>(ex, "sysfs attribute " + path);
             }
-            catch (UnauthorizedAccessException)
-            {
-                return null;
-            }
+        }
+
+        /// <summary>Attribute value or null; a failed read (not an absent one) is recorded.</summary>
+        private static string? ReadAttribute(DirectoryInfo directory, string attribute)
+        {
+            ReadOutcome<string> outcome = TryReadAttribute(Path.Combine(directory.FullName, attribute));
+            if (outcome.Succeeded) return outcome.Value;
+            if (outcome.IsFailed) ProcessRunner.WriteDiagnostic("LinuxSerialPortFinder", outcome.Describe());
+            return null;
         }
     }
 

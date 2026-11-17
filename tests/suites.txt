@@ -26,6 +26,7 @@ LogMerge
 VcomUnlockCli
 ApprovalGate
 VerdictHonesty
+CommandOutcomes
 VersionMetadata
 BatteryGate
 PwnJumpTable

@@ -178,6 +178,12 @@ def answer(text, code=0):
     print(text)
     sys.exit(code)
 if args[:1] == ["devices"]:
+    # D-25: the two shapes a broken/unusual client produces, so the CLI's exit code can be asserted.
+    if mode == "devices-error":
+        print("fastboot: error: could not open /dev/bus/usb/001/002", file=sys.stderr)
+        sys.exit(1)
+    if mode == "devices-unsupported":
+        answer("FAILED (remote: unknown command)", 1)
     answer("TEST fastboot")
 if mode == "silent-device" and args[:1] in (["getvar"], ["oem"]):
     # D-08: connected, but every probe is rejected — the "connected but knows nothing" shape.
@@ -861,6 +867,57 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     }
 }
 
+// ---------------------------------------------------------------- 14. D-25: probe vs "no device"
+// A failing `fastboot devices` used to be reported exactly like "no phone plugged in" (exit 2),
+// because IsDeviceConnected swallowed every exception into false. A broken client is an environment
+// finding (exit 1), a missing subcommand is its own token, and "no device" stays exit 2.
+{
+    stubEnvironment["KIRIN_FASTBOOT"] = stub;
+    try
+    {
+        stubEnvironment["STUB_MODE"] = "devices-error";
+        (int code, string stdout, string stderr) = Run("info", "--json");
+        Check(code == 1, "D-25: info exits 1 (not 2/no-device) when the devices probe fails (got " + code + "): " + stderr.Trim());
+        using JsonDocument doc = JsonDocument.Parse(stdout);
+        JsonElement device = doc.RootElement.GetProperty("device");
+        Check(device.GetProperty("status").GetString() == "probe-failed", "D-25: info names the probe failure in device.status");
+        Check(!device.GetProperty("connected").GetBoolean(), "D-25: a failed probe is still not reported as connected");
+        Check((device.GetProperty("probe").GetString() ?? "").StartsWith("failed:", StringComparison.Ordinal),
+            "D-25: device.probe carries the outcome kind");
+        Check((device.GetProperty("probeReason").GetString() ?? "").Contains("could not open"),
+            "D-25: device.probeReason carries the tool's own words");
+
+        (code, stdout, stderr) = Run("doctor", "--json");
+        Check(code == 1, "D-25: doctor exits 1 when the devices probe fails (got " + code + "): " + stderr.Trim());
+        using JsonDocument doctorDoc = JsonDocument.Parse(stdout);
+        Check(doctorDoc.RootElement.GetProperty("status").GetString() == "probe-failed", "D-25: doctor carries the same token");
+        Check(doctorDoc.RootElement.GetProperty("ok").GetBoolean() == false, "D-25: doctor ok is false for a failed probe");
+        JsonElement probeCheck = doctorDoc.RootElement.GetProperty("checks").EnumerateArray()
+            .First(entry => entry.GetProperty("name").GetString() == "fastboot-device");
+        Check(probeCheck.GetProperty("ok").GetBoolean() == false, "D-25: the fastboot-device check is not ok");
+        Check((probeCheck.GetProperty("detail").GetString() ?? "").Contains("failed:"),
+            "D-25: the fastboot-device check prints the reason instead of 'no device in fastboot mode'");
+
+        stubEnvironment["STUB_MODE"] = "devices-unsupported";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 5, "D-25: an unsupported devices probe exits 5 (client cannot be used) (got " + code + ")");
+        using JsonDocument unsupportedDoc = JsonDocument.Parse(stdout);
+        Check(unsupportedDoc.RootElement.GetProperty("device").GetProperty("status").GetString() == "probe-unsupported",
+            "D-25: 'unknown command' is probe-unsupported, not probe-failed");
+
+        stubEnvironment["STUB_MODE"] = "ok";
+        (code, stdout, stderr) = Run("info", "--json");
+        Check(code == 0, "D-25: a working probe is unchanged (exit 0) (got " + code + ")");
+        using JsonDocument okDoc = JsonDocument.Parse(stdout);
+        Check(okDoc.RootElement.GetProperty("device").GetProperty("probe").GetString() == "ok",
+            "D-25: a working probe reports probe=ok");
+    }
+    finally
+    {
+        stubEnvironment.Clear();
+    }
+}
+
 stubEnvironment.Clear();
 try { Directory.Delete(stubDir, true); } catch { }
 
@@ -1188,6 +1245,59 @@ try { Directory.Delete(stubDir, true); } catch { }
         "M4: the decompressor uses the asserted helper (no second copy of the formula)");
     Check(!runner.Contains("Math.Max(512L * chunk", StringComparison.Ordinal),
         "M4: the old inline formula is gone");
+}
+
+// ---------------------------------------------------------------- 15. D-24: ALL, not ANY
+// FrpBypassResult/EnableDowngradeResult used to expose OverallSuccess = step1 || step2 || …
+// ("one erase went through" == success). No caller used it, so it was a dead-code trap: the name
+// promised a judgement and delivered an OR. It is now an all-steps judgement, and the OR aggregate
+// is not offered under any other name.
+{
+    Type frpType = typeof(Kirin_Tool.Models.FrpBypassResult);
+    Type downgradeType = typeof(Kirin_Tool.Models.EnableDowngradeResult);
+    Check(frpType.GetProperty("OverallSuccess") == null,
+        "D-24: FrpBypassResult no longer exposes the OR aggregate under the success-sounding name");
+    Check(downgradeType.GetProperty("OverallSuccess") == null,
+        "D-24: EnableDowngradeResult no longer exposes the OR aggregate either");
+    Check(frpType.GetProperty("AllStepsSucceeded") != null && frpType.GetProperty("HasFailure") != null,
+        "D-24: FrpBypassResult names the two judgements a caller can actually act on");
+    Check(downgradeType.GetProperty("AllStepsSucceeded") != null && downgradeType.GetProperty("HasFailure") != null,
+        "D-24: EnableDowngradeResult names them too");
+
+    // The decisive shape: two steps OK, one step failed.
+    var frp = new Kirin_Tool.Models.FrpBypassResult { Step1Success = true, Step2Success = true, Step3Success = false };
+    Check(!frp.AllStepsSucceeded, "D-24: two OK + one failed is NOT a success (the old OR said true)");
+    Check(frp.HasFailure, "D-24: two OK + one failed reports a failure");
+    Check(!frp.AllStepsFailed && frp.SuccessfulStepsCount == 2, "D-24: partial progress is still visible (2/3) and is not called total failure");
+
+    var frpAll = new Kirin_Tool.Models.FrpBypassResult { Step1Success = true, Step2Success = true, Step3Success = true };
+    Check(frpAll.AllStepsSucceeded && !frpAll.HasFailure, "D-24: three OK steps are a success, and only then");
+
+    var frpNone = new Kirin_Tool.Models.FrpBypassResult();
+    Check(!frpNone.AllStepsSucceeded && frpNone.AllStepsFailed && frpNone.HasFailure, "D-24: no step OK is a failure");
+
+    var downgrade = new Kirin_Tool.Models.EnableDowngradeResult
+    { Step1Success = true, Step2Success = true, Step3Success = true, Step4Success = false };
+    Check(!downgrade.AllStepsSucceeded && downgrade.HasFailure,
+        "D-24: three OK + one failed version-field erase is NOT 'downgrade enabled' (the old OR said true)");
+    Check(downgrade.SuccessfulStepsCount == 3 && !downgrade.AllStepsFailed,
+        "D-24: 3/4 is reported as partial, not as an all-failed run");
+
+    var downgradeAll = new Kirin_Tool.Models.EnableDowngradeResult
+    { Step1Success = true, Step2Success = true, Step3Success = true, Step4Success = true };
+    Check(downgradeAll.AllStepsSucceeded && !downgradeAll.HasFailure, "D-24: 4/4 OK is a success, and only then");
+
+    // Source guard: the OR form must not come back as a differently named aggregate.
+    foreach (string model in new[] { "Models/FrpBypassResult.cs", "Models/EnableDowngradeResult.cs" })
+    {
+        string text = File.ReadAllText(Path.Combine(root, model));
+        Check(!text.Contains("bool OverallSuccess", StringComparison.Ordinal),
+            "D-24: " + model + " does not reintroduce the OR property (comments may quote the removed one)");
+        Check(!text.Contains("=> Step1Success ||", StringComparison.Ordinal) && !text.Contains("|| Step2Success;", StringComparison.Ordinal),
+            "D-24: " + model + " has no step-OR aggregate in any spelling");
+        Check(text.Contains("AllStepsSucceeded => Step1Success && Step2Success", StringComparison.Ordinal),
+            "D-24: " + model + " spells the aggregate as an AND chain");
+    }
 }
 
 Console.WriteLine(checks + " write gate checks passed.");

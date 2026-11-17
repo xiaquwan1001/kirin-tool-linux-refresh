@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Avalonia;
 using Avalonia.Styling;
+using Kirin_Tool.Services.Verdict;
+using Kirin_Tool.Utils;
 
 namespace Kirin_Tool.Services;
 
@@ -75,6 +77,21 @@ public static class UserSettings
     private static UserSettingsData _data = new();
     private static string? _configDirectory;
     private static bool _loaded;
+
+    /// <summary>
+    /// D-25 (audit S31/S33): what the last load from disk did. A corrupt <c>settings.json</c> used to
+    /// be renamed to <c>.bad</c> with no trace at all, so "all my remembered paths reset themselves"
+    /// had no explanation anywhere. <c>Ok(path)</c> = read (or a fresh default with no file),
+    /// <c>Failed(reason)</c> = the file was unreadable/corrupt; the reason names the file, the target
+    /// of the quarantine move and whether the move itself worked.
+    /// </summary>
+    public static ReadOutcome<string> LastLoadOutcome { get; private set; }
+
+    /// <summary>
+    /// Same idea for the write side: a read-only home or a full disk keeps the app running with
+    /// in-memory values, which is fine — silently, it was not.
+    /// </summary>
+    public static ReadOutcome<string> LastSaveOutcome { get; private set; }
 
     /// <summary>
     /// Points the service at <paramref name="configDir"/> (defaults to the XDG
@@ -334,44 +351,80 @@ public static class UserSettings
         var path = Path.Combine(_configDirectory ??= ResolveDefaultConfigDirectory(), FileName);
         try
         {
-            if (!File.Exists(path)) return new UserSettingsData();
+            if (!File.Exists(path))
+            {
+                LastLoadOutcome = ReadOutcome<string>.Ok(path + " (absent: defaults)");
+                return new UserSettingsData();
+            }
+
             var json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<UserSettingsData>(json) ?? new UserSettingsData();
+            var data = JsonSerializer.Deserialize<UserSettingsData>(json);
+            if (data == null)
+            {
+                // "null" is valid JSON and deserializes to null: a saved-but-empty file, not a
+                // healthy read. Treat it as the corrupt case so it is reported, not prayed over.
+                LastLoadOutcome = ReadOutcome<string>.Failed(path + " contains no settings object; defaults used");
+                QuarantineLocked(path);
+                return new UserSettingsData();
+            }
+
+            LastLoadOutcome = ReadOutcome<string>.Ok(path);
+            return data;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            QuarantineLocked(path);
+            // D-25: the quarantine still happens (behaviour unchanged — a corrupt file must not keep
+            // the app from starting), but it is no longer silent: the kind, the exception and the
+            // move target are recorded and written to the diagnostic log.
+            string reason = path + " could not be read (" + ex.GetType().Name + ": " + ex.Message + ")";
+            string? movedTo = QuarantineLocked(path);
+            LastLoadOutcome = ReadOutcome<string>.Failed(movedTo != null
+                ? reason + "; moved to " + movedTo + " and defaults were used"
+                : reason + "; it could not be moved aside and defaults were used");
+            ProcessRunner.WriteDiagnostic("UserSettings", LastLoadOutcome.Describe());
             return new UserSettingsData();
         }
     }
 
-    private static void QuarantineLocked(string path)
+    /// <summary>Move an unreadable file aside. Returns where it went, or null when nothing was moved.</summary>
+    private static string? QuarantineLocked(string path)
     {
+        string target = Path.Combine(Path.GetDirectoryName(path) ?? ".", CorruptFileName);
         try
         {
-            if (!File.Exists(path)) return;
-            File.Move(path, Path.Combine(Path.GetDirectoryName(path) ?? ".", CorruptFileName), overwrite: true);
+            if (!File.Exists(path)) return null;
+            File.Move(path, target, overwrite: true);
+            return target;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // A file we cannot even move must not take the application down.
+            // A file we cannot even move must not take the application down — but the failure is
+            // part of the outcome above, not swallowed.
+            ProcessRunner.WriteDiagnostic("UserSettings",
+                "quarantine " + path + " -> " + target + " failed: " + ex.GetType().Name + ": " + ex.Message);
+            return null;
         }
     }
 
     private static void WriteToDiskLocked()
     {
+        var directory = _configDirectory ??= ResolveDefaultConfigDirectory();
+        var path = Path.Combine(directory, FileName);
         try
         {
-            var directory = _configDirectory ??= ResolveDefaultConfigDirectory();
             Directory.CreateDirectory(directory);
-            var path = Path.Combine(directory, FileName);
             var temporary = path + ".tmp";
             File.WriteAllText(temporary, JsonSerializer.Serialize(_data, JsonOptions));
             File.Move(temporary, path, overwrite: true);
+            LastSaveOutcome = ReadOutcome<string>.Ok(path);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Read-only home or a full disk: keep running with in-memory values.
+            // Read-only home or a full disk: keep running with in-memory values (unchanged), but the
+            // caller can now see that the values on disk are stale.
+            LastSaveOutcome = ReadOutcome<string>.Failed(
+                path + " not written (" + ex.GetType().Name + ": " + ex.Message + "); values are in memory only");
+            ProcessRunner.WriteDiagnostic("UserSettings", LastSaveOutcome.Describe());
         }
     }
 }
