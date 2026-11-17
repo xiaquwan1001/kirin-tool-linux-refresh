@@ -191,3 +191,75 @@ PASS failed writes prevent USB Update entry command
 **行为变更声明**：设备能报平台时，rescue 目标改由设备决定（这是本条债务的目的）；设备报不出时多一次**显式**确认，
 且在确认前不发任何命令（测试里「缺 ERECOVERY 时不写」「失败不进 USB Update」等既有断言继续通过）。
 命令内容、命令顺序、超时与重试未改。
+
+
+## 全量验证（真跑，2026 现场）
+
+```
+$ dotnet build Kirin-Tool.csproj -c Release -p:NuGetAudit=false
+    3 个警告
+    0 个错误
+已用时间 00:00:02.38
+
+$ dotnet build KirinTool.Cli/KirinTool.Cli.csproj -c Release -p:NuGetAudit=false
+    3 个警告
+    0 个错误
+已用时间 00:00:00.98
+```
+
+（3 个警告是既有的 Avalonia `AVLN3001` XAML 资源告警，来自 `UI/*Dialog.axaml`，与本 lane 无关。）
+
+`while read -r t; … dotnet run --project "tests/$t" … done < tests/suites.txt` —— **25 个 suite，25 个 SUITE-OK，0 个 FAILED**：
+
+| suite | 末行 | 结果 |
+| :--- | :--- | :--- |
+| FlashPolicy | 55 flash policy checks passed. | PASS |
+| StableParity | 35 stable parity checks passed; no hardware accessed. | PASS |
+| FastbootReads | PASS partial failed table | PASS |
+| VcomPromptUi | PASS dead FlashPartitionsWithProgress(List<PartitionInfo>) overload removed | PASS |
+| GuiQol | 8 GUI QoL checks passed; headless, no device access. | PASS |
+| Extractor | 43 extractor checks passed. | PASS |
+| UsbDiagnostics | 49 USB diagnostic checks passed; simulated transport only. | PASS |
+| UsbRedlineGate | 13 redline gate checks passed; no device accessed. | PASS |
+| UsbTransport | PASS extractor: the refused entry left nothing behind inside either | PASS |
+| UsbUpdateUi | PASS rendered rows, reboot success/failure and completion controls; sources=True | PASS |
+| UsbUpdateVerdict | all 39 USB-update verdict checks passed | PASS |
+| OemInfoUi | 5 OEMInfo UI checks passed; headless, no device access. | PASS |
+| UdevNotice | 24 udev notice checks passed; no host rule writes or USB operations. | PASS |
+| Kirin9000 | 122 Kirin9000/PSID checks passed; no device operations. | PASS |
+| WriteGates | 169 write gate checks passed. | PASS |
+| McpProtocol | 17 MCP protocol checks passed. | PASS |
+| OtaPlan | 20 ota plan checks passed. | PASS |
+| PreOpBackup | BackupPlan: all checks passed | PASS |
+| SurfaceParity | 415 surface parity checks passed. | PASS |
+| OpLogging | 168 operation-logging checks passed; no device, fastboot or adb was contacted. | PASS |
+| LogMerge | 79 log-merge checks passed; no device, fastboot or adb was contacted. | PASS |
+| VcomUnlockCli | 98 VCOM unlock parity checks passed; no hardware accessed. | PASS |
+| ApprovalGate | 111 approval-gate checks passed. | PASS |
+| VerdictHonesty | 81 verdict-honesty checks passed; no hardware accessed. | PASS |
+| VersionMetadata | 7 version-metadata checks passed; no device was contacted. | PASS |
+
+**FAIL 数 = 0**（无新增失败，也没有既有失败）。`tests/suites.txt` 里被刻意排除的 `VcomOpenProbe`/
+`UsbUpdateProbe`/`VisualParity` 依旧不跑（需要真实 USB / 字体像素），符合纪律。
+
+## 三条债的提交
+
+```
+3d7a2d0 fix(rescue): rescue 目标分区改由设备真实平台决定，下拉回退必须显式确认并显示来源（D-15 / audit BB-19）
+1ab6c47 fix(read): 「连上」与「问出东西」分成两个判据，info/doctor 用 status+exit 6 区分（D-08 / audit F17+F18）
+ca46f3f fix(fastboot): 血统成为可观测事实，doctor 的 ok 不再无条件为真（D-07 / audit P11+P12+P13+H32）
+5979f8a docs(lane): R7-B2 血统/身份类债务清偿报告骨架
+```
+
+## 纪律自查
+
+- 未运行任何 adb / fastboot / VCOM / 串口 / usb 探针；全部断言走进程内 stub 与纯函数（`tests/Kirin9000`
+  的「fake fastboot」是本地 python 脚本，不是真设备）。
+- 未改 `loaders/`、`fastboot/payload`、硬件 blob；未改串口时序或协议命令（D-15 复用的 `getvar chipset`
+  是既有只读命令）。
+- 未改 `docs/debt-register.md`（状态列留给编排者）。
+- 冻结面只动 `tests/StableParity/boundary.json` 的一处 sha256 + reference（D-15 修复点在
+  `MainWindow.axaml.cs`，原因见该节；`StableParity` 35 条断言全过）。
+- 唯一跨 lane 的行为变更（任何编排者需要知道的）：**`doctor` 在非华为血统 fastboot 下由 exit 0 变 exit 6，
+  `info`/`doctor` 在 `connected-but-empty` 下由 exit 0 变 exit 6**；两条 CI 冒烟脚本与 `tests/WriteGates`
+  的旧断言已同步改成显式断言 6（不是放松断言）。`docs/cli-mcp.md` 退出码表已补 6。
