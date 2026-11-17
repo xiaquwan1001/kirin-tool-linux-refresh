@@ -8,6 +8,19 @@
 没有证据的条目不写「已修」——不确定的一律标 `unknown` 并写清缺什么证据。
 
 
+## v3.1.0 变更（主机侧，无设备）
+
+本轮只做**判据/可观测性**清偿（wire 命令、时序、重试次数不变）：
+
+- **D-21 → fixed-in-3.1.0**（P21）：MCP 的 `initialize` 不再回显固定版本。
+  `Cli/Mcp/McpProtocol.cs` 是版本常量的唯一出处（`LatestVersion` + `SupportedVersions` + `Negotiate`），
+  支持集内回显（`outcome=echoed`）、不支持回落本机支持的最高版本并在 result 的 `protocolNegotiation`
+  里给出 `requested/returned/outcome/supported/detail`，同时 stderr 打 `protocol negotiation mismatch:`；
+  `McpServer.Initialize` 只调用它（`Cli/Mcp/McpServer.cs`）。断言 `tests/McpProtocol`（34 条，含
+  `Cli/**/*.cs` 只允许一处版本字面量的源码扫描）。
+- 验证：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 全量 rc=0。
+
+
 ## v2.4.15 变更（2026-11-13）
 
 - **D-01 → fixed-in-2.4.15**：`oeminfo` 拆成 `oeminfo-convert`（PlanOnly，只在本机构造镜像）与
@@ -158,7 +171,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 | D-18 | P02 / H15 | Linux 自动探测仍按「内核驱动名恰好是 `option`」决定是否关 RTS/DTR（已有 `--port`/`BulkOnly` 逃逸，默认路径未改成能力探测） | open | `Services/VcomFlasher.cs:117-122` |
 | D-19 | H06 / H50 / H51 | loader 目录仍是 `<base>/loaders/<cpu>`：CLI 只有 `--loader-dir` 参数，没有 `KIRIN_LOADERS_DIR`；命名仍是 `<stage>.ktl`/`fastbootf.ktl` | open | `Services/FirmwareUnlocker.cs:89,178`；`Cli/CommandSupport.cs:195-229` |
 | D-20 | P15 | `packaging/publish.sh` 不产出 `loaders/`，但 deb/AppRun 假定它存在 → 打包产物里 VCOM 解锁会报 `Loader directory for <cpu> not found` | open | `packaging/build-deb.sh:5`、`packaging/AppRun:3`（注释假定），`packaging/publish.sh` 内无 `loaders` 拷贝 |
-| D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | open | `Cli/Mcp/McpServer.cs:14,112` |
+| D-21 | P21 | MCP `protocolVersion` 固定 `2024-11-05`，不校验客户端版本 | **fixed-in-3.1.0** | `Cli/Mcp/McpProtocol.cs:36-95`（版本常量唯一出处 + `Negotiate`：echoed/fallback/defaulted）、`Cli/Mcp/McpServer.cs:112-160`（`Initialize(parameters, log)` 协商 + `protocolNegotiation` 字段 + stderr 失配告警）；`tests/McpProtocol` 34 条（含「版本字面量只允许一处」源码扫描） |
 | D-22 | P09 / P08 | udev 文案与随包规则仍是两套写法（内置 `MODE=0660 + TAG uaccess` 无 GROUP；包用 `GROUP=plugdev`/`adbusers`/`uucp`）；且检查是静态读文本，`TAG+="uaccess"` 依赖 logind 会话，SSH/无桌面会话照样拿不到权限 | open | `Services/UdevRuleNotice.cs:19-22,62-78`；`packaging/51-kirin-tool-fastboot.rules:1-10` |
 | D-23 | BB-14 / BB-25 / BB-29 / S34 | GUI 侧隐式步骤仍在：写前备份恒开不可关、结果只进进度框一行；USB Update 新红线分区二次确认后台阻塞（超时=静默取消）；路径过长只 warn | open | GUI 备份调用点见审计原文；超时分支 `Task.WhenAny(..., Task.Delay(10min))`（S34 同源） |
 | D-24 | S21 | `FrpBypassResult.OverallSuccess` / `EnableDowngradeResult.OverallSuccess` 仍是「任一 step 成功即 true」的 OR 语义（当前无调用者，属死代码陷阱） | open | `Models/FrpBypassResult.cs:34`；`Models/EnableDowngradeResult.cs:37` |
