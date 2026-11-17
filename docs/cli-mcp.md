@@ -67,7 +67,12 @@ kirin-tool-cli flash-ota base.app --yes    # real write of all non-redline parti
 
 ### 退出码
 
-0 成功 / 1 用法 / 2 无设备 / 3 设备拒绝（含 `--strict-names` 拒绝、部分刷写失败、写后读回不一致）/ 4 被闸门拒（未确认或 PlanOnly 确认）/ 5 文件或校验失败（含刷写 0/0 全失败）。
+0 成功 / 1 用法 / 2 无设备 / 3 设备拒绝（含 `--strict-names` 拒绝、部分刷写失败、写后读回不一致）/ 4 被闸门拒（未确认或 PlanOnly 确认）/ 5 文件或校验失败（含刷写 0/0 全失败）/ **6 降级（D-07 / D-08）**。
+
+**exit 6 = 命令跑通、结论诚实，但环境不健康**，必须区别于 0（健康）与 5（找不到可用东西）：
+
+- `doctor`：fastboot 找得到也能跑，但血统不是随包的华为客户端（`fastboot.parity` 为 `google`/ `unknown`，per-check `fastboot-parity` 为 `--`）——Google platform-tools 对华为临时 loader 的 `getvar`/`oem` 是已知必坏路径，此时 `ok` 恒为 `false`（D-07 / 审计 P11+P13）。
+- `doctor` / `info`：设备连上了但**一无所知**（`device.status = "connected-but-empty"`：所有 `getvar` 被拒、`oem get-psid` 不可用、`ptable` 读不到），此时不再是 exit 0（D-08 / 审计 F17+F18）。
 
 `write-sn` 只有**读回一致**才 exit 0：写入命令失败、读回不可用、读回不一致一律 exit 3，`reason` 分别是
 `command_failed` / `readback_unavailable` / `readback_mismatch:<读回值>`，且 JSON 里带

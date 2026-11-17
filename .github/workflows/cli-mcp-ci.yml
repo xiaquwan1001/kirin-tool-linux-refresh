@@ -115,9 +115,17 @@ jobs:
           } > "$stub/fastboot"
           chmod +x "$stub/fastboot"
 
-          KIRIN_FASTBOOT="$stub/fastboot" "$cli" doctor --json | tee /tmp/doctor.json
+          # D-07: the stub is not the bundled Huawei client, so `doctor` must report parity
+          # "unknown", ok:false and exit 6 (degraded) instead of claiming a healthy environment.
+          set +e
+          KIRIN_FASTBOOT="$stub/fastboot" "$cli" doctor --json > /tmp/doctor.json
+          doctor_code=$?
+          set -e
+          test "$doctor_code" -eq 6
           grep -q '"fastboot-found"' /tmp/doctor.json
           grep -q '"loaders-bundled"' /tmp/doctor.json
+          grep -q '"fastboot-parity"' /tmp/doctor.json
+          grep -q '"parity":"unknown"' /tmp/doctor.json
           "$stub/fastboot" --version
 
       - name: Smoke test - stdio MCP session

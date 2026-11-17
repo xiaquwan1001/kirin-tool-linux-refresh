@@ -675,9 +675,21 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
     try
     {
         (int code, string stdout, string stderr) = Run("doctor", "--json");
-        Check(code == 0, "doctor against an override fastboot exits 0 (got " + code + "): " + stderr.Trim());
+        // D-07: the stub is not the bundled Huawei client. "found && runs" is no longer reported as a
+        // healthy environment: exit 6 (degraded, see Cli/ExitCodes.Degraded) and ok:false.
+        Check(code == 6, "doctor against a non-bundled override fastboot exits 6/degraded (got " + code + "): " + stderr.Trim());
         using JsonDocument doc = JsonDocument.Parse(stdout);
         JsonElement doctorRoot = doc.RootElement;
+        Check(doctorRoot.GetProperty("ok").GetBoolean() == false,
+            "doctor --json ok is false for a non-Huawei-parity fastboot (was unconditionally true before D-07)");
+        Check(doctorRoot.GetProperty("fastboot").GetProperty("parity").GetString() == "unknown",
+            "doctor --json reports fastboot.parity=unknown for an unverifiable override path");
+        JsonElement parityCheck = doctorRoot.GetProperty("checks").EnumerateArray()
+            .First(entry => entry.GetProperty("name").GetString() == "fastboot-parity");
+        Check(parityCheck.GetProperty("ok").GetBoolean() == false,
+            "the per-check table carries fastboot-parity with ok=false, next to fastboot-found/fastboot-runs");
+        Check(parityCheck.GetProperty("detail").GetString()!.Contains("unknown"),
+            "the fastboot-parity detail names the lineage token");
         Check(doctorRoot.GetProperty("degraded").EnumerateArray().Any(entry => entry.GetString() == "system-fastboot-fallback"),
             "doctor --json reports degraded:[system-fastboot-fallback]");
         Check(doctorRoot.GetProperty("fastboot").GetProperty("fallback").GetBoolean(),
@@ -700,6 +712,24 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         var core = typeof(Kirin_Tool.Services.FastbootClient).Assembly;
         Type signals = core.GetType("Kirin_Tool.Cli.DegradedSignals")
             ?? throw new Exception("FAIL Kirin_Tool.Cli.DegradedSignals is gone");
+        // D-07: the lineage classifier itself (path provenance is the only thing it can prove).
+        Type parityType = core.GetType("Kirin_Tool.Services.FastbootParity")
+            ?? throw new Exception("FAIL Kirin_Tool.Services.FastbootParity is gone");
+        var classifyParity = parityType.GetMethod("Classify", BindingFlags.Public | BindingFlags.Static)!;
+        string ParityOf(string? path, string? version = null) =>
+            (string)classifyParity.Invoke(null, new object?[] { path, version })!;
+        Check(ParityOf("/usr/bin/fastboot") == "google", "/usr/bin/fastboot is classified google (distro platform-tools)");
+        Check(ParityOf("/opt/android-sdk/platform-tools/fastboot") == "google",
+            "an SDK platform-tools layout is classified google");
+        Check(ParityOf(Path.Combine(AppContext.BaseDirectory, "fastboot", "fastboot")) == "huawei",
+            "the bundled directory is the only path that proves huawei lineage");
+        Check(ParityOf("") == "unknown" && ParityOf(null) == "unknown", "an absent fastboot has no lineage (unknown)");
+        Check(ParityOf(stub) == "unknown", "an arbitrary override path is unknown, not silently assumed Huawei");
+        Check(ParityOf("/tmp/fastboot", "fastboot version 35.0.2 (platform-tools)") == "google",
+            "a version line that says platform-tools is google even from an odd path");
+        Check(new Kirin_Tool.Services.FastbootClient("/usr/bin/fastboot").Parity == "google",
+            "FastbootClient exposes the lineage of the binary every one of its commands will run");
+
         var classify = signals.GetMethod("IsSystemFastbootFallback", BindingFlags.Public | BindingFlags.Static)!;
         Check((bool)classify.Invoke(null, new object[] { "/usr/bin/fastboot" })!,
             "/usr/bin/fastboot is classified as the system fallback");

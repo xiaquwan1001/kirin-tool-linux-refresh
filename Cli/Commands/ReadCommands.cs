@@ -55,6 +55,9 @@ internal sealed class InfoCommand : ICliCommand
             {
                 found = session != null,
                 path = session?.ExecutablePath,
+                // D-07: the same lineage token as `doctor`, so "connected but every getvar failed"
+                // can be answered by the client's provenance instead of blaming the cable.
+                parity = FastbootParity.Classify(session?.ExecutablePath),
             },
             device = new
             {
@@ -150,10 +153,18 @@ internal sealed class DoctorCommand : ICliCommand
             : "unknown";
 
         var loaders = BundledLoaders.Inventory();
+
+        // D-07 (audit P11/P12/P13/H32): "found && runs" is not the same as "the client that works".
+        // The lineage token is derived from the resolved path (the bundled directory is the only
+        // provenance the tool can prove) and, when available, the `--version` line.
+        string parity = FastbootParity.Classify(fastbootPath, fastbootVersion);
+        bool parityOk = string.Equals(parity, FastbootParity.Huawei, StringComparison.Ordinal);
+
         var checks = new List<object>
         {
             new { name = "fastboot-found", ok = fastbootPath != null, detail = fastbootPath ?? "not found (KIRIN_FASTBOOT / PATH)" },
             new { name = "fastboot-runs", ok = fastbootVersion != null, detail = fastbootVersion ?? "fastboot --version failed" },
+            new { name = "fastboot-parity", ok = parityOk, detail = parity + " — " + FastbootParity.Describe(parity) },
             new { name = "adb-found", ok = adbPath != null, detail = adbPath ?? "not found (optional, KIRIN_ADB / PATH)" },
             new { name = "loaders-bundled", ok = loaders.Count > 0, detail = $"{loaders.Count} chip directories under {BundledLoaders.Directory}" },
             new { name = "fastboot-device", ok = connected, detail = connected ? (probes.GetValueOrDefault("product") ?? "connected") : "no device in fastboot mode" },
@@ -170,7 +181,7 @@ internal sealed class DoctorCommand : ICliCommand
                 architecture = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString(),
                 runtime = System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier,
             },
-            fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, devices = fastbootDevices },
+            fastboot = new { found = fastbootPath != null, path = fastbootPath, version = fastbootVersion, parity, devices = fastbootDevices },
             adb = new { found = adbPath != null, path = adbPath, version = adbVersion, devices = adbDevices },
             loaders = new
             {
@@ -188,7 +199,9 @@ internal sealed class DoctorCommand : ICliCommand
                 dumpCapable = connected && fastbootPath != null,
             },
             checks,
-            ok = fastbootPath != null && fastbootVersion != null,
+            // D-07: a non-Huawei binary can no longer be reported as healthy; the environment can be
+            // "found and running" and still be the wrong client (audit P13).
+            ok = fastbootPath != null && fastbootVersion != null && parityOk,
         };
 
         if (context.Json)
@@ -199,6 +212,7 @@ internal sealed class DoctorCommand : ICliCommand
         {
             context.Output.WriteLine($"{ToolInfo.Name} {ToolInfo.Version} on {payload.host.os} ({payload.host.architecture})");
             context.Output.WriteLine($"fastboot: {fastbootPath ?? "NOT FOUND"}  {(fastbootVersion != null ? "[" + fastbootVersion + "]" : string.Empty)}");
+            context.Output.WriteLine($"fastboot parity: {parity}  ({(parityOk ? "ok" : "NOT the bundled Huawei client")})");
             context.Output.WriteLine($"adb:      {adbPath ?? "not found (optional)"}  {(adbVersion != null ? "[" + adbVersion + "]" : string.Empty)}");
             context.Output.WriteLine($"fastboot devices: {(fastbootDevices.Count == 0 ? "(none)" : string.Join(" | ", fastbootDevices))}");
             context.Output.WriteLine($"adb devices:      {(adbDevices.Count == 0 ? "(none)" : string.Join(" | ", adbDevices))}");
@@ -231,6 +245,14 @@ internal sealed class DoctorCommand : ICliCommand
         {
             context.Diag("error: fastboot is present but does not run; check the binary and its permissions");
             return ExitCodes.FileOrVerify;
+        }
+        if (!parityOk)
+        {
+            // Exit 6, not 0: the environment runs, but a read through this client is expected to fail
+            // against Huawei temporary loaders, and the caller must not read that as "healthy".
+            context.Diag("warning: fastboot parity " + parity + " — " + FastbootParity.Describe(parity)
+                + "; set KIRIN_FASTBOOT to the bundled client (exit 6)");
+            return ExitCodes.Degraded;
         }
         return ExitCodes.Ok;
     }
