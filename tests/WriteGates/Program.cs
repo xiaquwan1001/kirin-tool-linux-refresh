@@ -605,6 +605,56 @@ stubEnvironment["KIRIN_FASTBOOT"] = stub;
         await goodClient.OemCommandAsync("dump-storage nvm \"" + Path.Combine(stubDir, "nvm.img") + "\"");
         string[] goodCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
         Check(goodCalls.Any(line => line.Contains("dump-storage")), "a named device still dumps (dump-storage allowed)");
+
+        // 10e. argv list overload (audit round5 §10): the same command as tokens. The child must
+        // receive exactly the argv the quoted string form produced (a host path with a space stays
+        // one argument), a leading "oem" token must not be doubled, and the read gate must judge the
+        // same token list the child gets.
+        Environment.SetEnvironmentVariable("STUB_MODE", "ok");
+        var overloadClient = new FastbootClient(stub);
+        string spacedPath = Path.Combine(stubDir, "list form.img");
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync(new[] { "dump-emmc", "ptable", spacedPath });
+        string[] listCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync("dump-emmc ptable \"" + spacedPath + "\"");
+        string[] stringCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        // Only the oem invocation is compared: the two clients have their own identity cache, so the
+        // number of getvar probes may differ, but the command that reaches the child must not.
+        string[] listOemCalls = listCalls.Where(line => line.StartsWith("oem ", StringComparison.Ordinal)).ToArray();
+        string[] stringOemCalls = stringCalls.Where(line => line.StartsWith("oem ", StringComparison.Ordinal)).ToArray();
+        Check(listOemCalls.Length == 1 && listOemCalls.SequenceEqual(stringOemCalls),
+            "the argv list overload sends exactly the same child argv as the quoted single-string form ("
+            + string.Join(" | ", listOemCalls) + " vs " + string.Join(" | ", stringOemCalls) + ")");
+        Check(listCalls.Any(line => line.Contains("dump-emmc") && line.Contains("list form.img")),
+            "a host path containing a space stays one argument in the list form");
+
+        File.Delete(callLog);
+        await overloadClient.OemCommandAsync(new[] { "oem", "dump-storage", "nvm", spacedPath + "2" });
+        string[] prefixedCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(prefixedCalls.Any(line => line.StartsWith("oem dump-storage", StringComparison.Ordinal)),
+            "a leading 'oem' token is accepted and not doubled (" + string.Join(" | ", prefixedCalls) + ")");
+        Check(!prefixedCalls.Any(line => line.Contains("oem oem", StringComparison.Ordinal)),
+            "the child argv never carries a doubled 'oem' prefix");
+
+        bool emptyRefused = false;
+        try { await overloadClient.OemCommandAsync(Array.Empty<string>()); } catch (ArgumentException) { emptyRefused = true; }
+        Check(emptyRefused, "an empty argv list is a usage error, not a bare 'fastboot oem'");
+        bool bareOemRefused = false;
+        try { await overloadClient.OemCommandAsync(new[] { "oem" }); } catch (ArgumentException) { bareOemRefused = true; }
+        Check(bareOemRefused, "a list that is only 'oem' is a usage error, not a bare 'fastboot oem'");
+
+        // The read gate is applied to the list form on the tokens the child will get.
+        Environment.SetEnvironmentVariable("STUB_MODE", "bad-product");
+        var overloadRefusedClient = new FastbootClient(stub);
+        File.Delete(callLog);
+        bool overloadRefused = false;
+        try { await overloadRefusedClient.OemCommandAsync(new[] { "dump-emmc", "ptable", spacedPath }); }
+        catch (Kirin_Tool.Services.DeviceIdentityGate.DeviceIdentityRefusedException) { overloadRefused = true; }
+        Check(overloadRefused, "the argv list form is gated by the same read identity probe");
+        string[] overloadRefusedCalls = File.Exists(callLog) ? File.ReadAllLines(callLog) : Array.Empty<string>();
+        Check(!overloadRefusedCalls.Any(line => line.Contains("dump-emmc")),
+            "an invalid identity sends zero dump commands through the list form");
     }
     finally
     {
@@ -764,6 +814,80 @@ try { Directory.Delete(stubDir, true); } catch { }
             Check((DateTime.UtcNow - started).TotalSeconds < 5,
                 "M2: the refusal is immediate, not a walk over the declared chunk count (" + (DateTime.UtcNow - started).TotalSeconds.ToString("0.00") + "s)");
         }
+
+        // M2 (r7-b4, §1.2 续): the header's TotalBlocks is a claim about how many blocks the image
+        // expands to, and the chunks have to add up to it. This is the same rule libsparse applies
+        // when it reads an image back; the verdict is a pure function so it is checked both ways.
+        byte[] SparseDeclared(uint totalBlocks, uint blockSize, params (ushort Type, uint Blocks, uint TotalSize)[] chunks)
+        {
+            using var stream = new MemoryStream();
+            using var writer = new BinaryWriter(stream);
+            writer.Write(0xed26ff3au); writer.Write((ushort)1); writer.Write((ushort)0);
+            writer.Write((ushort)28); writer.Write((ushort)12); writer.Write(blockSize);
+            writer.Write(totalBlocks); writer.Write((uint)chunks.Length); writer.Write(0u);
+            foreach (var chunk in chunks)
+            {
+                writer.Write(chunk.Type); writer.Write((ushort)0); writer.Write(chunk.Blocks); writer.Write(chunk.TotalSize);
+                // Payload bytes (zeroed) so the geometry checks that run before the block-sum
+                // accounting see a file whose chunks really are inside it.
+                writer.Write(new byte[Math.Max(0, (int)chunk.TotalSize - 12)]);
+            }
+            return stream.ToArray();
+        }
+
+        var blockSumFailures = new (string Label, byte[] Bad)[]
+        {
+            ("M2: TotalBlocks smaller than what the chunks describe is refused",
+                SparseDeclared(0, 4096, ((ushort)0xcac1, 0u, 12u + 4096u))),
+            ("M2: TotalBlocks larger than what the chunks describe is refused",
+                SparseDeclared(99, 4096, ((ushort)0xcac1, 0u, 12u + 4096u))),
+            ("M2: a raw chunk whose payload is not a multiple of BlockSize is refused",
+                SparseDeclared(0, 4096, ((ushort)0xcac1, 0u, 12u + 100u))),
+        };
+        foreach ((string label, byte[] bad) in blockSumFailures)
+        {
+            string badPath = Path.Combine(spoil, "bad-blocksum");
+            File.WriteAllBytes(badPath, bad);
+            bool refused = false;
+            try { await SuperMerger.MergeSuperImages(Path.Combine(spoil, "good"), badPath, Path.Combine(spoil, "merged-blocksum")); }
+            catch (InvalidDataException) { refused = true; }
+            Check(refused, label);
+        }
+
+        // A header that adds up still merges: the refusal must not tax well-formed images. Both
+        // sides are built by SparseDeclared (12-byte chunk headers, payload present), because the
+        // older local Sparse() helper above writes 14-byte chunk headers - malformed on purpose for
+        // the geometry cases, but not something a valid image should look like.
+        string consistentA = Path.Combine(spoil, "consistent-a");
+        File.WriteAllBytes(consistentA, SparseDeclared(3, 4096,
+            ((ushort)0xcac1, 0u, 12u + 4096u), ((ushort)0xcac3, 2u, 12u), ((ushort)0xcac4, 0u, 16u)));
+        string consistentB = Path.Combine(spoil, "consistent-b");
+        File.WriteAllBytes(consistentB, SparseDeclared(2, 4096, ((ushort)0xcac1, 0u, 12u + 8192u)));
+        string consistentOut = Path.Combine(spoil, "merged-consistent");
+        await SuperMerger.MergeSuperImages(consistentA, consistentB, consistentOut);
+        Check(File.Exists(consistentOut) && new FileInfo(consistentOut).Length > 0,
+            "M2: an image whose TotalBlocks equals its chunk accounting still merges");
+
+        // The verdict itself (machine token `failed` / `verified`), device-free.
+        var tooFew = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(2, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac1, 0, 12 + 4096),
+        });
+        Check(tooFew.Token == "failed" && !tooFew.Consistent && tooFew.AccountedBlocks == 1,
+            "M2: TotalBlocks=2 with one raw 4096-byte chunk is verdict=failed (accounted 1)");
+        var addsUp = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(3, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac1, 0, 12 + 4096),
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac3, 2, 12),
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0xcac4, 0, 16),
+        });
+        Check(addsUp.Token == "verified" && addsUp.AccountedBlocks == 3,
+            "M2: raw(1) + dontcare(2) + crc32(0) is verdict=verified for TotalBlocks=3");
+        var unknownChunk = Kirin_Tool.Services.Verdict.SparseBlockSum.Evaluate(0, 4096, new[]
+        {
+            new Kirin_Tool.Services.Verdict.SparseChunkFact(0x1234, 0, 12),
+        });
+        Check(unknownChunk.Token == "failed", "M2: an unknown chunk type is verdict=failed");
     }
     finally { try { Directory.Delete(spoil, true); } catch { } }
 
@@ -847,6 +971,98 @@ try { Directory.Delete(stubDir, true); } catch { }
         Check(dtdRefused, "M5: a flashing xml with a DTD/entity is refused instead of resolving it");
     }
     finally { try { Directory.Delete(xmlDir, true); } catch { } }
+}
+
+// ---------------------------------------------------------------- 13. D-12 usb-update-flash
+// BB-09: the GUI could burn a whole package over the USB-update channel; the CLI/MCP could not.
+// These checks pin the new face without a device: the registry row, the fact that both faces call
+// the *same* service method, that the gate refuses before the transfer starts for every missing
+// acknowledgement, and that the three-state verdict maps onto the shared write report.
+{
+    var row = Kirin_Tool.Services.Capabilities.CapabilityRegistry.ById("usb-update-flash");
+    Check(row != null, "D-12: capability 'usb-update-flash' is registered");
+    Check(row!.CliCommand == "usb-update-flash" && row.McpTool == "usb_update_flash"
+            && row.GuiHandler == "StartFullOtaButton_Click",
+        "D-12: GUI + CLI + MCP faces are declared on the registry row");
+    Check(row.WriteKind == Kirin_Tool.Services.Capabilities.CapabilityWriteKind.Write && row.NeedsApproval,
+        "D-12: it is a gated write capability (not read-only, not plan-only)");
+    Check(row.ServiceMethod == "USBUpdateFlasherService.FlashPartitions",
+        "D-12: the registry names the service method (got '" + row.ServiceMethod + "')");
+    Check(row.Reversibility == Kirin_Tool.Services.Approval.ApprovalReversibility.Irreversible,
+        "D-12: the transfer is declared irreversible (a full-package burn cannot be undone)");
+
+    // Same service method from both faces: this is the parity claim, checked on the sources so it
+    // cannot drift into "the CLI re-implements the unpack loop".
+    string guiSource = File.ReadAllText(Path.Combine(root, "MainWindow.axaml.cs"));
+    Check(guiSource.Contains("_usbUpdateFlasherService.FlashPartitions(", StringComparison.Ordinal),
+        "D-12: the GUI's USB Update path calls USBUpdateFlasherService.FlashPartitions");
+    string cliSource = File.ReadAllText(Path.Combine(root, "Cli/Commands/UsbUpdateFlashCommand.cs"));
+    Check(cliSource.Contains("service.FlashPartitions(", StringComparison.Ordinal),
+        "D-12: the CLI command calls the same USBUpdateFlasherService.FlashPartitions");
+
+    // The gate stops the run before any transport is opened: each missing acknowledgement gets its
+    // own refusal and the service's own log lines never appear.
+    string d12Dir = Path.Combine(Path.GetTempPath(), "kirin-d12-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(d12Dir);
+    try
+    {
+        string package = Path.Combine(d12Dir, "Base_UPDATE.APP");
+        File.WriteAllBytes(package, Array.Empty<byte>());
+
+        (int code, string stdout, string stderr) = Run("usb-update-flash", package, "--json");
+        Check(code == 4, "D-12: usb-update-flash without --yes exits 4 (got " + code + "); stderr: " + stderr.Trim());
+        using (JsonDocument doc = JsonDocument.Parse(stdout))
+        {
+            Check(doc.RootElement.GetProperty("gate").GetString() == "refused"
+                    && doc.RootElement.GetProperty("applied").GetBoolean() == false,
+                "D-12: the refusal is applied=false, gate=refused");
+        }
+        Check(!stderr.Contains("usb-update:", StringComparison.Ordinal),
+            "D-12: the transfer never starts when the gate refuses (no service log lines)");
+
+        (code, stdout, stderr) = Run("usb-update-flash", package, "--yes", "--json");
+        Check(code == 4 && stderr.Contains("allow-redline", StringComparison.Ordinal),
+            "D-12: --yes alone is refused: an irreversible transfer also needs --allow-redline (stderr: " + stderr.Trim() + ")");
+
+        (code, stdout, stderr) = Run("usb-update-flash", package, "--yes", "--allow-redline", "--json");
+        Check(code == 4 && stderr.Contains("I UNDERSTAND usb-update-flash", StringComparison.Ordinal),
+            "D-12: --yes --allow-redline on a non-interactive stdin is refused with the exact phrase (stderr: " + stderr.Trim() + ")");
+        Check(!stderr.Contains("usb-update:", StringComparison.Ordinal),
+            "D-12: neither acknowledgement level reaches the transfer");
+
+        // UsbUpdateVerdict -> WriteReport (docs/usb-update-verdict.md). Device-free: the mapping is
+        // the rule, the verdict is a plain record.
+        MethodInfo mapVerdict = typeof(FastbootClient).Assembly
+            .GetType("Kirin_Tool.Cli.Commands.UsbUpdateFlashCommand")!
+            .GetMethod("MapVerdict", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)!;
+
+        Kirin_Tool.Services.USBUpdate.UsbUpdateVerdict Verdict(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome outcome) =>
+            new(outcome,
+                new[] { "boot" },
+                outcome == Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Verified ? new[] { "boot" } : Array.Empty<string>(),
+                Array.Empty<Kirin_Tool.Services.USBUpdate.UsbUpdateSkip>(),
+                outcome == Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed ? new[] { "boot" } : Array.Empty<string>(),
+                outcome != Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed,
+                "test verdict",
+                Array.Empty<Kirin_Tool.Services.USBUpdate.UsbUpdateEvent>());
+
+        (bool Applied, string Gate, int Exit) Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome outcome)
+        {
+            object report = mapVerdict.Invoke(null, new object[] { Verdict(outcome), new { test = true } })!;
+            Type type = report.GetType();
+            return ((bool)type.GetProperty("Applied")!.GetValue(report)!,
+                    (string)type.GetProperty("Gate")!.GetValue(report)!,
+                    (int)type.GetProperty("ExitCode")!.GetValue(report)!);
+        }
+
+        var verified = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Verified);
+        Check(verified == (true, "applied", 0), "D-12: a verified transfer maps to applied/exit 0 (got " + verified + ")");
+        var partial = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Partial);
+        Check(partial == (true, "partial", 3), "D-12: a partial transfer maps to partial/exit 3 (got " + partial + ")");
+        var failed = Report(Kirin_Tool.Services.USBUpdate.UsbUpdateOutcome.Failed);
+        Check(failed == (false, "failed", 3), "D-12: a failed transfer maps to failed/exit 3 (got " + failed + ")");
+    }
+    finally { try { Directory.Delete(d12Dir, true); } catch { } }
 }
 
 Console.WriteLine(checks + " write gate checks passed.");

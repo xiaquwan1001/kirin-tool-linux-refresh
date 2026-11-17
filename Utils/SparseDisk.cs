@@ -50,5 +50,13 @@ namespace Kirin_Tool.Utils
     {
         public const uint SPARSE_HEADER_MAGIC = 0xed26ff3a;
         public const ushort CHUNK_HEADER_SIZE = 12;
+
+        // Chunk types (AOSP sparse_format.h). The block accounting below is decided by these:
+        // a raw chunk expands to its payload / BlockSize, fill and dontcare expand to ChunkSize
+        // blocks, and a crc32 chunk (4 payload bytes, no data) expands to nothing.
+        public const ushort CHUNK_TYPE_RAW = 0xcac1;
+        public const ushort CHUNK_TYPE_FILL = 0xcac2;
+        public const ushort CHUNK_TYPE_DONT_CARE = 0xcac3;
+        public const ushort CHUNK_TYPE_CRC32 = 0xcac4;
     }
 }

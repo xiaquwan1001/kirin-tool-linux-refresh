@@ -339,12 +339,41 @@ namespace Kirin_Tool.Services
             return result.Output;
         }
 
-        public async Task<string> OemCommandAsync(string command, int timeoutMinutes = 300)
+        /// <summary>
+        /// <c>fastboot oem &lt;command&gt;</c> from a verbatim command line. The string is tokenised
+        /// with <see cref="OperationLogger.ParseArgv"/> (quote aware) and then handed to the argv
+        /// overload, so the child process receives the same tokens the read gate judged and the
+        /// op log recorded — one code path for both forms (audit round5 §10).
+        /// </summary>
+        public Task<string> OemCommandAsync(string command, int timeoutMinutes = 300) =>
+            OemCommandAsync(OperationLogger.ParseArgv(command), timeoutMinutes);
+
+        /// <summary>
+        /// The same command as an argv list. Each token is passed as its own child argument
+        /// (<see cref="ProcessRunner"/>'s ArgumentList path), so a host path that contains spaces or
+        /// quotes cannot be re-split by a shell or by argument parsing. A leading <c>oem</c> token is
+        /// accepted and not doubled, so callers can pass either the sub-command or the full command.
+        /// </summary>
+        public async Task<string> OemCommandAsync(IReadOnlyList<string> argv, int timeoutMinutes = 300)
         {
+            ArgumentNullException.ThrowIfNull(argv);
+            if (argv.Count == 0)
+                throw new ArgumentException("an oem command needs at least one token", nameof(argv));
+
+            IReadOnlyList<string> subCommand = argv[0].Trim().Equals("oem", StringComparison.OrdinalIgnoreCase)
+                ? argv.Skip(1).ToList()
+                : argv.ToList();
+            if (subCommand.Count == 0)
+                throw new ArgumentException("an oem command needs a sub-command after 'oem'", nameof(argv));
+
             // R1: `oem dump-emmc/dump-storage` write real files on the host; they are not writes
-            // to the device and therefore were outside the K6 gate. They are gated here.
-            if (IsDevicePullingCommand(OperationLogger.ParseArgv(command))) await EnsureReadableIdentityAsync();
-            var result = await ProcessRunner.RunAsync(_fastbootPath, $"oem {command}", timeoutMinutes: timeoutMinutes, op: "fastboot.oem." + FirstWord(command));
+            // to the device and therefore were outside the K6 gate. They are gated here, on the same
+            // token list the child will receive.
+            if (IsDevicePullingCommand(subCommand)) await EnsureReadableIdentityAsync();
+
+            var full = new List<string>(subCommand.Count + 1) { "oem" };
+            full.AddRange(subCommand);
+            var result = await ProcessRunner.RunAsync(_fastbootPath, full, timeoutMinutes: timeoutMinutes, op: "fastboot.oem." + FirstWord(subCommand));
             return result.Output;
         }
 
@@ -362,9 +391,11 @@ namespace Kirin_Tool.Services
         }
 
         /// <summary>First token of a command line, for op naming (`oem frp-erase` → `frp-erase`).</summary>
-        private static string FirstWord(string commandLine)
+        private static string FirstWord(string commandLine) => FirstWord(OperationLogger.ParseArgv(commandLine));
+
+        /// <summary>First non-option token of an already tokenised command, for op naming.</summary>
+        private static string FirstWord(IReadOnlyList<string> tokens)
         {
-            IReadOnlyList<string> tokens = OperationLogger.ParseArgv(commandLine);
             foreach (string token in tokens)
             {
                 if (!token.StartsWith("-", StringComparison.Ordinal)) return token;
