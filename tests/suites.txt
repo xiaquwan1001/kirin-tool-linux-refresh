@@ -28,3 +28,4 @@ ApprovalGate
 VerdictHonesty
 VersionMetadata
 BatteryGate
+PwnJumpTable

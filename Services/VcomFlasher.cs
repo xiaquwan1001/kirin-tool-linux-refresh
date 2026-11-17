@@ -220,19 +220,10 @@ namespace Kirin_Tool.Services
 
             if (exploitInfo.shouldHeadResend)
             {
-                int xloaderStart = exploitInfo.Cpu switch
-                {
-                    "hisi710" => 0x2316D,
-                    "hisi710a" => 0x23155,
-                    "hisi970" => 0x2316D,
-                    "hisi980" => 0x2316D,
-                    "hisi810" => 0x23155,
-                    "hisi820" => 0x23155,
-                    "hisi985" => 0x23155,
-                    "hisi990" => 0x23155,
-                    _ => throw new NotSupportedException($"Exploit requested for an unsupported CPU: {exploitInfo.Cpu}."),
-                };
-                await ExploitBootrom(xloaderStart, exploitInfo.Cpu);
+                // D-06: the pwn jump targets are an explicit table (Services/PwnJumpTable.cs), not
+                // inlined switch literals — the same lookup, the same exception on an unknown CPU.
+                PwnJumpAddresses jump = PwnJumpTable.For(exploitInfo.Cpu);
+                await ExploitBootrom(jump);
             }
             else
             {
@@ -241,22 +232,15 @@ namespace Kirin_Tool.Services
             await Task.Delay(500);
         }
 
-        private async Task ExploitBootrom(int xloaderStartAddr, string cpu)
+        private async Task ExploitBootrom(PwnJumpAddresses jump)
         {
-            await WriteAndVerify(BuildHeadCmd(0x22000, 4), true, "HEAD", 0x22000);
-            await Task.Delay(100);
+            // The frame order, addresses, delays and payload bytes are the pre-D-06 ones; only the
+            // source of the two literals changed (they come from PwnJumpTable now).
+            int xloaderStartAddr = jump.XloaderStart;
+            int returnAddr = jump.ReturnAddr;
 
-            int returnAddr = cpu switch {
-                "hisi970" => 0x4DBC8,
-                "hisi980" => 0x4DBC8,
-                "hisi710" => 0x49BC8,
-                "hisi710a" => 0x49BC8,
-                "hisi810" => 0x4DBC8,
-                "hisi820" => 0x673c8,
-                "hisi985" => 0x673c8,
-                "hisi990" => 0x673c8,
-                _ => throw new NotSupportedException($"Exploit requested for an unsupported CPU: {cpu}."),
-            };
+            await WriteAndVerify(BuildHeadCmd(PwnJumpTable.BootromHeadAddress, 4), true, "HEAD", PwnJumpTable.BootromHeadAddress);
+            await Task.Delay(100);
 
             await WriteAndVerify(BuildHeadCmd(returnAddr, 4), false, "HEAD", returnAddr);
 
@@ -275,10 +259,10 @@ namespace Kirin_Tool.Services
 
             byte[] payloadBytes = BitConverter.GetBytes(xloaderStartAddr);
             if (!BitConverter.IsLittleEndian) Array.Reverse(payloadBytes);
-            await WriteAndVerify(BuildDataCmd(1, payloadBytes), true, "DATA", 0x22000, 1);
+            await WriteAndVerify(BuildDataCmd(1, payloadBytes), true, "DATA", PwnJumpTable.BootromHeadAddress, 1);
             await Task.Delay(10);
 
-            await WriteAndVerify(BuildTailCmd(2), false, "TAIL", 0x22000, 2);
+            await WriteAndVerify(BuildTailCmd(2), false, "TAIL", PwnJumpTable.BootromHeadAddress, 2);
             await Task.Delay(100);
         }
 
