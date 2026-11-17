@@ -41,6 +41,10 @@ SSL_DEPENDS='libssl3t64 | libssl3 | libssl1.1'
 
 [ -d "$PUBLISH" ] || { echo "✗ publish dir not found: $PUBLISH" >&2; exit 1; }
 [ -x "$PUBLISH/Kirin-Tool" ] || { echo "✗ $PUBLISH/Kirin-Tool is not executable (run packaging/publish.sh first)" >&2; exit 1; }
+# D-20: the .deb layout assumes loaders/ sits next to the binary (VCOM unlock reads
+# <app>/loaders/<cpu>). Assert it here, where the message can name the actionable cause,
+# instead of letting the installed package report "Loader directory for <cpu> not found".
+"$ROOT/packaging/check-loaders.sh" "$PUBLISH"
 if [ -n "$CLI_BINARY" ] && [ ! -x "$CLI_BINARY" ]; then echo "✗ CLI binary not executable: $CLI_BINARY" >&2; exit 1; fi
 
 STAGE="$(mktemp -d)"

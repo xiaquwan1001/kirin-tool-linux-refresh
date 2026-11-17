@@ -32,4 +32,5 @@ PwnJumpTable
 SocWriteRequirements
 ModemLinePolicy
 LoaderDirectory
+LoaderPackaging
 DloadSentinel

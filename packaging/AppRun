@@ -3,6 +3,9 @@
 # The self-contained app resolves its bundled fastboot/ and loaders/ relative
 # to its own directory (AppContext.BaseDirectory), so keeping the whole
 # publish tree under usr/bin/ preserves all resource lookups.
+# D-20: loaders/ is part of that tree because packaging/publish.sh checks it
+# (packaging/check-loaders.sh); an image without it would fail VCOM unlock with
+# "Loader directory for <cpu> not found". Set KIRIN_LOADERS_DIR to override.
 HERE=$(dirname "$(readlink -f "$0")")
 export APPDIR="$HERE"
 export KIRIN_APPIMAGE=1

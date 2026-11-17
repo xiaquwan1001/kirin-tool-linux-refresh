@@ -25,6 +25,8 @@ check() {
     test -x "$srcdir/publish-out/Kirin-Tool"
     "$srcdir/publish-out/fastboot/fastboot" --version >/dev/null
     test -f "$srcdir/publish-out/libkirin_usb_update.so"
+    # D-20: the packaged app reads <app>/loaders/<cpu>; publish.sh already validates the set.
+    test -d "$srcdir/publish-out/loaders"
 }
 package() {
     local appdir="$pkgdir/usr/lib/$pkgname"
