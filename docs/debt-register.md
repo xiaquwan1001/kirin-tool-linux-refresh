@@ -35,6 +35,15 @@
   GUI 先过 `RequestGuiApprovalAsync` 再走 `DeviceWriteOps.EnableDowngradeAsync(ticket)`；CLI/MCP 同步（[downgrade-gate.md](downgrade-gate.md)）。
 - **剩余 open 项**：见下表 `open` 行；`D-12`（整包 USB Update 仍无 CLI/MCP 面）等下一轮。
 
+## v3.0.0 变更（2026-11-17，主机侧，无设备）
+
+发布前独立复核（不看 lane 自报，逐条对代码位置 + 断言）：round3/round4/round5 与 r6/r7 声称已修的全部条目均有代码与断言证据，`tests/suites.txt` **28/28 rc=0**、两个项目 0 error、CI 的三段 smoke（`--help`/`version`/stub `doctor`=exit 6/MCP `initialize`+`tools/list`）本机手跑通过。清单与逐条证据见 [release-notes/v3.0.0.md](release-notes/v3.0.0.md)。复核过程中只发现两条遗留，均在本轮关闭：
+
+- **S19 → fixed-in-3.0.0**（D-01 家族 / round5 §3）：GUI Convert OEM 直写分支不再丢弃 `oeminfoerase-disablewp` 的返回值——用 `CommandOutput` 判据分级，非 OKAY 即停在两条字段写命令之前，进度窗名为该步并以 `Write Failed` 收尾（成功路径的命令顺序/取值不变）。代码 `MainWindow.axaml.cs`（`BtnConvertOem_Click` 直写分支），断言 `tests/Kirin9000` S19 三条（未发 `oeminfowrite*`、文案点名该步、标题 `Write Failed`）；`tests/StableParity/boundary.json` 的 MainWindow hash 已按行为变更刷新并在 `reference` 写明理由。
+- **M4 缺断言 → fixed-in-3.0.0**（round5 §7）：gzip 解压上限原本只存在于 CLI 内联表达式，无任何断言。现抽成纯函数 `Services/Verdict/GzipExtractionLimit.cs`（`min(free space, max(512 MiB, 32x compressed))`，未知空闲空间回落为尺寸上界而非常无上限），`Cli/Commands/OtaFlashRunner.cs` 改为调用它，`tests/WriteGates` M4 段 8 条断言（512 MiB 底、32x、空闲空间封顶、小于底的盘、0/负压缩长度、未知空闲空间、并扫描 OtaFlashRunner 确认只有一份公式）。
+- **仍然 open**：D-18…D-27（可移植性/可读性/隐式步骤），以及三条已知取舍：M5 对包外绝对路径 fail-closed、R3 的 Windows PnP 归并只有假数据断言（本机无 Windows）、`OemInfoService` 0600 与 unlockcode 上位拷贝是代码审查而非独立断言。
+
+
 ## v2.4.26 变更（2026-11-17，主机侧，无设备）
 
 r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命令、时序与重试），`tests/suites.txt` **28/28 rc=0**（新增 BatteryGate / PwnJumpTable / DloadSentinel 三套）。
@@ -48,7 +57,7 @@ r7 三批并行清偿（每条一个 commit，只改判据/面，不改 wire 命
 - **D-12 → fixed-in-2.4.26**（BB-09）：USB Update 整包刷写补上 CLI/MCP 面（`usb-update-flash`，`Cli/Commands/UsbUpdateFlashCommand.cs`），复用既有 `Services/USBUpdate` 实现与三态 `UsbUpdateVerdict`，与 GUI 同源调用同一 service 方法，同样过审批/红线/不可逆闸门；注册表与 `SurfaceParity` H1/H3/H7 同步。
 - **M2 → fixed-in-2.4.26**（round5 §10 遗留）：sparse `TotalBlocks` 从「声明」变成「被校验的声明」——合并前把每个 chunk 折算成块数（raw = payload / BlockSize、fill/dontcare = ChunkSize、crc32 = 0）与 `header.TotalBlocks` 比对，不一致即 `SparseBlockSum` verdict=failed 并拒绝输入；合法输入的合并字节与输出 layout 完全不变（Windows golden byte 测试逐字节相等）。
 - **`oem dump-emmc` argv 列表重载 → fixed-in-2.4.26**（round5 §10 遗留）：补上多 argv 形式与解析，既有单 argv 行为不变。
-- **仍未动**：S19（`oeminfoerase-disablewp` 返回值丢弃，属 D-01 家族）。
+- **仍未动**：S19（`oeminfoerase-disablewp` 返回值丢弃，属 D-01 家族）→ **v3.0.0 已清偿**（见下一条 v3.0.0 变更）。
 - 验证口径：`dotnet build Kirin-Tool.csproj` / `KirinTool.Cli.csproj` 各 0 error；`tests/suites.txt` 25 个既有套件 + 3 个新套件全 PASS；`tests/StableParity/boundary.json` 只刷新被真实改动文件的 hash，并在 `reference` 里写清行为变更理由。
 
 ## v2.4.25 变更（2026-11-17，主机侧，无设备）
@@ -209,17 +218,17 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | BB-02 | 解锁 bootloader | fixed | 见 §1 |
 | BB-03 | Remove FRP | fixed | 见 §1 |
 | BB-04 | Enable Downgrade（4×`oem oeminfoerase-*ver`） | fixed | 拆成 `downgrade-enable`（PlanOnly）+ `downgrade-erase`（Write，过闸门），见 D-13 |
-| BB-05 | OEMInfo 直写（`oeminfoerase-disablewp` + `oeminfowrite-*`） | **open（最高危）** | D-01 |
+| BB-05 | OEMInfo 直写（`oeminfoerase-disablewp` + `oeminfowrite-*`） | fixed（D-01/D-13 in 2.4.15；S19 in 3.0.0） | GUI 直写分支过 `oeminfo-flash` 票据 + 身份闸门，`oeminfoerase-disablewp` 的返回被判级 |
 | BB-06 | 写 NVE SN | fixed | 见 §1 |
 | BB-07 | Reboot to USB Update（救援分区） | fixed | 见 §1 |
 | BB-08 | Software Testpoint Enter/Exit | fixed | 见 §1 |
-| BB-09 | USB Update 模式刷整包 | **open** | D-12 |
+| BB-09 | USB Update 模式刷整包 | fixed-in-2.4.26 | D-12（`usb-update-flash`） |
 | BB-10 | `fastboot reboot` | fixed | 见 §1 |
 | BB-11 | `oem` 类读（`lock-state info`/`oeminforead-*`/`get-build-number`） | **部分 open** | `psid` 有面（`Cli/Commands/InspectCommands.cs:87`）；其余仍只有 GUI |
 | BB-12 | About 三外链 | wontfix | §2.3 |
-| BB-13 | 写 `./dload`（先递归删除） | **部分 open** | CLI 侧已改临时目录；GUI 仍 `"dload"`（D-14） |
+| BB-13 | 写 `./dload`（先递归删除） | fixed-in-2.4.26 | D-14：CLI/GUI 都用 `PrivateWorkDirectory`，删除过 `DloadSentinel` |
 
-**结论：13 条里 7 条已关闭，5 条 open（其中 1 条最高危 = BB-05），1 条 wontfix。**
+**结论（v3.0.0 复核后）：13 条里 11 条已关闭，1 条部分 open（BB-11：`oem` 类读仍只有 `psid` 有 CLI/MCP 面），1 条 wontfix（BB-12）。**
 
 ### 「仍有副作用的只读/UI 项」清单（本次明确保留的）
 
@@ -241,19 +250,19 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | 审计序 | 条目 | 状态 | 本文件条目 |
 | :--- | :--- | :--- | :--- |
 | 1 | S01/S02 ACK 校验被注释 | fixed | §1 |
-| 2 | H20/H23 pwn 入口与返回地址 | open | D-06 |
+| 2 | H20/H23 pwn 入口与返回地址 | fixed-in-2.4.26 | D-06 |
 | 3 | F01 "Unlock Complete" | fixed | §1 |
 | 4 | F02/S15 `Skipped` + 继续 | fixed | §1 |
 | 5 | F10/S06/S07 USB Update 假成功 | fixed | D-04 |
 | 6 | S10/S11 `--require-backup` 静默失效 | fixed | §1 |
 | 7 | S12 ArgParser 宽松 | fixed | §1 |
-| 8 | F04/S18 写 SN 只看退出码 | GUI fixed / CLI open | §1 + D-03 |
-| 9 | F03/S17 跳过计成功 | GUI fixed / CLI 部分 | D-05 |
-| 10 | F07 `applied:true` 在 0/N 时也出 | open（范围更大） | D-02 |
+| 8 | F04/S18 写 SN 只看退出码 | fixed-in-2.4.15（读回比对） | §1 + D-03 |
+| 9 | F03/S17 跳过计成功 | fixed-in-2.4.25 | D-05 |
+| 10 | F07 `applied:true` 在 0/N 时也出 | fixed-in-2.4.15 | D-02 |
 | 11 | S03/S04/S05 握手与 reboot 返回值丢弃 | fixed | D-04 |
-| 12 | P11/P12/P14/P13 fastboot 血统 | open | D-07 |
+| 12 | P11/P12/P14/P13 fastboot 血统 | fixed-in-2.4.26（P14「随包 fastboot 需联网构建」仍 open） | D-07 |
 | 13 | F09/S22 dump 只判 >0 字节 | fixed | D-09 |
-| 14 | S19 `oeminfoerase-disablewp` 结果丢弃 | open | D-01 |
+| 14 | S19 `oeminfoerase-disablewp` 结果丢弃 | fixed-in-3.0.0 | D-01 |
 | 15 | F05 oeminfo 命中 0 条仍成功 | fixed | D-11 |
 
 ---
@@ -264,9 +273,9 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 
 | 编号 | 假设 | 会造成的误判 | 状态 |
 | :--- | :--- | :--- | :--- |
-| P11 | 无随包 fastboot 时静默回落系统 fastboot | Google platform-tools 的 `getvar` 对华为临时 loader 全失败 → 被读成「设备没连/线坏」 | open（D-07） |
-| P12 | CLI 候选链含 5 级相对回溯 + `/usr/bin` | 同上；且 `doctor` 不区分血统 | open（D-07） |
-| P13 | `doctor.ok = 找到 && 能跑` | `ok:true` 被当成「环境健康」 | open（D-08） |
+| P11 | 无随包 fastboot 时静默回落系统 fastboot | Google platform-tools 的 `getvar` 对华为临时 loader 全失败 → 被读成「设备没连/线坏」 | fixed-in-2.4.26（D-07：回落进 `degraded`，血统进 doctor） |
+| P12 | CLI 候选链含 5 级相对回溯 + `/usr/bin` | 同上；且 `doctor` 不区分血统 | fixed-in-2.4.26（D-07：回落在每个结果里可见，doctor 报血统） |
+| P13 | `doctor.ok = 找到 && 能跑` | `ok:true` 被当成「环境健康」 | fixed-in-2.4.26（D-07/D-08：非华为血统 ok=false 且 exit 6） |
 | P14 | 随包 fastboot 需联网构建；仓库里只有 `fastboot/payload` | 未跑构建时必然落到 P11 | open |
 | P15 | 打包产物假定含 `loaders/`，`publish.sh` 不产出 | VCOM 解锁报「loader 目录不存在」→ 被读成本机权限问题 | open（D-20） |
 | P01 | Windows 用 WMI `Caption LIKE '%(COM%'` + `Substring` 解析 | 设备名不含 `(COMx)` 时静默 null → 报「没有 VCOM 设备」而不是「端口名解析失败」 | open |
@@ -274,7 +283,7 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 | P05 / P06 | 只认 `/dev/ttyUSB*`、`ttyACM*`、`ttyGS*`，接口匹配只认 `ff/13/23` | 描述符一变 → 「未找到端口」，被读成设备没进模式 | open |
 | P08 | 静态读 udev 文本判「权限已覆盖」 | `TAG+="uaccess"` 在 SSH/无桌面会话无效 → 报「规则齐全」但 `open` 失败 | open（D-22） |
 | P21 | MCP 协议版本固定 | 新客户端协商行为未定义 → 工具「没出现」被读成服务没起 | open（D-21） |
-| P27 | 依赖英文前缀 `(bootloader)`/`OKAY`/`FAILED` | loader 改语言/加前缀 → 结论退化 Unknown，看起来像「设备异常」 | open（D-10） |
+| P27 | 依赖英文前缀 `(bootloader)`/`OKAY`/`FAILED` | loader 改语言/加前缀 → 结论退化 Unknown，看起来像「设备异常」 | fixed-in-2.4.25（D-10：行首 token + 失败优先，Unknown 有明确文案） |
 | P04 | Linux 与 Windows 是同一协议的两套传输实现 | Linux 侧行为差异无法用 Windows 结果背书 | open（无对照测试） |
 
 ---
@@ -305,7 +314,7 @@ B1 = 副作用在 CLI/MCP 完全不可达。E 之后写能力三面齐备，但�
 
 ## 统计（v2.4.14 基线）
 
-- 已关闭：16 条（B1 类 7 条、TOP15 中 6 条、其余为 S/F/H/P 单点）。
-- 仍 open：27 条（D-01…D-27），TOP3 = D-01（GUI OEMInfo 直写且绕闸门）/ D-02（`applied:true` 恒真）/ D-03（CLI 写 SN 无读回）。
+- 已关闭（v3.0.0 复核后）：D-01…D-17 全部 fixed；B1 类 11/13 关闭（BB-11 部分、BB-12 wontfix）；TOP15 全部关闭；P11/P12/P13/P27 关闭。
+- 仍 open：D-18…D-27 共 10 条（供货/打包/协议版本/udev 文案/GUI 隐式步骤/OR 语义/失败-不支持-超时未分/名单四份/知识重复），按危险度排序后 TOP3 = D-25（失败与不支持仍不可区分）、D-23（GUI 隐式步骤）、D-20（打包缺 loaders）。
 - wontfix：4 组（B 类 2 条 + 协议常量 13 条 + 纯 UI handler 17 个）。
 - unknown：审计报告中未逐行复核的剩余条目（见附录 E），数量取决于复核粒度，不在此虚报。
