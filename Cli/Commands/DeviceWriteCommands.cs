@@ -103,6 +103,14 @@ internal abstract class GatedDeviceWriteCommand : ICliCommand
 
     protected abstract string CapabilityId { get; }
 
+    /// <summary>
+    /// D-16: whether the shared pre-write battery floor applies. True for every command that
+    /// writes flash or persistent data (including <c>reboot-usb-update</c>, which flashes the
+    /// rescue partitions). Only <c>reboot</c> opts out: it writes nothing, and refusing it would
+    /// strand a low-battery device in fastboot instead of letting the user boot and charge.
+    /// </summary>
+    protected virtual bool RequiresBatteryGate => true;
+
     /// <summary>Dynamic facts (argv, targets, redline) for the approval request.</summary>
     protected abstract ApprovalRequest BuildRequest(ParsedArgs args, CliContext context);
 
@@ -122,6 +130,14 @@ internal abstract class GatedDeviceWriteCommand : ICliCommand
         ApprovalAdmission admission = await ApprovalGuard.AdmitAsync(request, cancellationToken).ConfigureAwait(false);
         if (!admission.IsApproved)
             return ApprovalReport.Refuse(context, Name, admission.Decision);
+
+        // D-16 battery floor: measured after approval (so a refusal is not reported as an approval
+        // problem) and before the service that writes anything. Refusal = nothing was written.
+        if (RequiresBatteryGate)
+        {
+            int? batteryRefusal = await BatteryWriteGate.CheckAsync(context, Name, await OpenConnectedSessionAsync(context)).ConfigureAwait(false);
+            if (batteryRefusal.HasValue) return batteryRefusal.Value;
+        }
 
         try
         {
@@ -221,6 +237,10 @@ internal sealed class RebootCommand : GatedDeviceWriteCommand
     };
 
     protected override string CapabilityId => "reboot";
+
+    // D-16: a reboot writes nothing, so the battery floor does not apply (refusing it would keep
+    // a low-battery device in fastboot, where it cannot charge).
+    protected override bool RequiresBatteryGate => false;
 
     protected override ApprovalRequest BuildRequest(ParsedArgs args, CliContext context) =>
         ApprovalRequests.For(CapabilityId, argv: new[] { "fastboot", "reboot" }, targets: Array.Empty<string>());

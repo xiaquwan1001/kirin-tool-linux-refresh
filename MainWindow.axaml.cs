@@ -627,9 +627,6 @@ namespace Kirin_Tool
             }
         }
 
-        // Battery below 50% is surfaced as a non-modal warning banner on the Device
-        // Information page (see RefreshBatteryBannerAsync); writes are deliberately
-        // NOT blocked here — warning-only by decision 2026-11-12.
         private async Task<(bool IsSuccess, string Message)> FlashPartitionsWithProgress(
         List<FastbootPartition> selectedPartitions,
         ProcessDialogUapp progressDialog,
@@ -637,6 +634,10 @@ namespace Kirin_Tool
         bool skipSecure = false,
         bool allowRedline = false)
         {
+            // D-16: shared pre-write battery floor (the same object the CLI and MCP paths ask).
+            if (!await EnsureBatteryAllowsWriteAsync("The XML flash"))
+                return (false, "Refused: battery below " + BatteryGate.MinimumPercent + "%");
+
             int successCount = 0;
             int skippedCount = 0;
             int totalCount = selectedPartitions.Count;
@@ -1001,11 +1002,11 @@ namespace Kirin_Tool
             }
         }
 
-        // Battery below 50% is surfaced as a non-modal warning banner on the Device
-        // Information page (see RefreshBatteryBannerAsync); writes are deliberately
-        // NOT blocked here — warning-only by decision 2026-11-12.
         private async Task StartUsbUpdateFlash()
         {
+            // D-16: shared pre-write battery floor (the same object the CLI and MCP paths ask).
+            if (!await EnsureBatteryAllowsWriteAsync("The USB Update flash")) return;
+
             using var cancellationTokenSource = new CancellationTokenSource();
             // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
             // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.
@@ -1313,15 +1314,16 @@ namespace Kirin_Tool
             }
         }
 
-        // Battery below 50% is surfaced as a non-modal warning banner on the Device
-        // Information page (see RefreshBatteryBannerAsync); writes are deliberately
-        // NOT blocked here — warning-only by decision 2026-11-12.
         private async Task<(bool IsSuccess, string Message)> FlashFullOtaPartitions(
         List<(PartitionInfo Partition, string? Source)> partitions,
         ProcessDialogUapp progressDialog,
         CancellationToken cancellationToken,
         bool allowRedline = false)
         {
+            // D-16: shared pre-write battery floor (the same object the CLI and MCP paths ask).
+            if (!await EnsureBatteryAllowsWriteAsync("The full OTA flash"))
+                return (false, "Refused: battery below " + BatteryGate.MinimumPercent + "%");
+
             int successCount = 0;
             int totalCount = partitions.Count;
             string? lastError = string.Empty;
@@ -2122,11 +2124,13 @@ namespace Kirin_Tool
             await dialogTask;
         }
 
-        // Battery below 50% is surfaced as a non-modal warning banner on the Device
-        // Information page (see RefreshBatteryBannerAsync); writes are deliberately
-        // NOT blocked here — warning-only by decision 2026-11-12.
         private async Task HandleRebootToUsbUpdate()
         {
+            // D-16: the reboot is the first step of the USB Update write sequence, so the same
+            // battery floor applies before it starts (nothing is lost by refusing here: the
+            // device stays in fastboot and the user can charge it).
+            if (!await EnsureBatteryAllowsWriteAsync("The USB Update reboot")) return;
+
             using var cancellationTokenSource = new CancellationTokenSource();
             // R2 (audit 2026-11-15 §4): registered so closing the window cancels this operation and
             // its fastboot child tree (see OperationCancellation) instead of leaving an orphan.

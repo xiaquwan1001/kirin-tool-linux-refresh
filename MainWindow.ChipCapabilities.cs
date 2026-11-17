@@ -2,57 +2,60 @@
 using Avalonia.Controls;
 using Kirin_Tool.Models;
 using Kirin_Tool.Services;
+using Kirin_Tool.Services.Verdict;
 using Kirin_Tool.UI;
 using Kirin_Tool.Utils;
 namespace Kirin_Tool;
 
 public partial class MainWindow
 {
-    // Non-modal, read-only battery banner. It never gates any write path and
-    // never blocks a button: it only informs (decision 2026-11-12, see
-    // docs/audit/2026-11-12/fix-F6.md). Temporary loaders commonly answer
-    // these getvar queries with "invalid command", so every failure is silent.
+    // Non-modal battery banner (informs) plus EnsureBatteryAllowsWriteAsync (gates): the level
+    // decides both. D-16 / audit S14: the banner used to be the ONLY use of the battery reading,
+    // so every write path flashed a 3%-battery device. The floor itself lives in
+    // Services/Verdict/BatteryGate.cs and is shared with the CLI and MCP entry points.
+    // Temporary loaders commonly answer these getvar queries with "invalid command", so every
+    // failure is silent and an unreadable level never refuses a write (see BatteryGate).
     private WindowsInfoBar? _batteryBanner;
     private bool _refreshingBatteryBanner;
 
     /// <summary>
-    /// Best-effort battery percentage via fastboot getvar. Tries
-    /// battery-soc, then battery-capacity, then battery-voltage. Only a
-    /// plausible 0-100 integer is returned; voltage (or anything
-    /// unparseable / rejected by the loader) yields null. Never throws.
+    /// Best-effort battery percentage via fastboot getvar. The candidate getvars, the parse and
+    /// the plausibility rules all come from <see cref="BatteryGate"/> (shared with CLI/MCP); this
+    /// method only supplies the fastboot query. Never throws.
     /// </summary>
-    private async Task<int?> TryReadBatteryPercentAsync()
+    private Task<int?> TryReadBatteryPercentAsync() =>
+        BatteryGate.ReadPercentAsync(QueryBatteryVariableAsync);
+
+    /// <summary>One getvar for the battery reader; a rejected variable yields null, never a throw.</summary>
+    private async Task<string?> QueryBatteryVariableAsync(string variable)
     {
-        foreach (string variable in new[] { "battery-soc", "battery-capacity", "battery-voltage" })
+        try
         {
-            try
-            {
-                ProcessResult result = await _fastbootClient.QueryVariableAsync(variable);
-                if (!result.IsSuccess) continue;
-                string output = result.Output ?? string.Empty;
-                if (output.Contains("FAILED", StringComparison.OrdinalIgnoreCase) ||
-                    output.Contains("invalid command", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                // Parse the first integer token after "battery-soc:" style output.
-                foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-                {
-                    string trimmed = line.Trim();
-                    if (trimmed.StartsWith("(bootloader)", StringComparison.Ordinal))
-                        trimmed = trimmed[12..].TrimStart();
-                    int colon = trimmed.IndexOf(':');
-                    if (colon >= 0) trimmed = trimmed[(colon + 1)..].Trim();
-                    if (variable == "battery-voltage") return null; // mV reading is not a percentage
-                    if (int.TryParse(trimmed.Split(' ', '%')[0], out int percent) && percent is >= 0 and <= 100)
-                        return percent;
-                }
-            }
-            catch
-            {
-                // Best effort only: an unreachable or temp-loader device must
-                // not raise an error dialog from a read-only hint.
-            }
+            ProcessResult result = await _fastbootClient.QueryVariableAsync(variable);
+            return result.IsSuccess ? result.Output ?? string.Empty : null;
         }
-        return null;
+        catch
+        {
+            // Best effort only: an unreachable or temp-loader device must
+            // not raise an error dialog from a read-only hint.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The GUI half of the shared pre-write battery floor (D-16): call it at the top of every
+    /// write entry point, before the first partition is written. Returns false (and says why)
+    /// when the device reports a level below <see cref="BatteryGate.MinimumPercent"/>; an
+    /// unreadable level proceeds, so a temporary loader is not bricked into "cannot flash".
+    /// </summary>
+    private async Task<bool> EnsureBatteryAllowsWriteAsync(string operation)
+    {
+        BatteryGateVerdict verdict = BatteryGate.Evaluate(await TryReadBatteryPercentAsync());
+        if (!verdict.Refuse) return true;
+
+        await ShowMessageBox("Battery Too Low",
+            $"{operation} refused: {verdict.Reason}\n\nGate: {verdict.Gate}, level: {verdict.Level}%.");
+        return false;
     }
 
     private void EnsureBatteryBanner()

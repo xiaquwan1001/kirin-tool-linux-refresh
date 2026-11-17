@@ -225,6 +225,10 @@ internal sealed class FlashOtaCommand : ICliCommand
             return ExitCodes.NoDevice;
         }
 
+        // D-16 battery floor: measured before the pre-op backup and before the first write.
+        int? batteryRefusal = await BatteryWriteGate.CheckAsync(context, Name, session);
+        if (batteryRefusal.HasValue) return batteryRefusal.Value;
+
         // Pre-op backup runs before any staging or writing; dump failures degrade to
         // warnings (see PreOpBackupCli) and only --require-backup turns them into a refusal.
         PreOpBackupResult backup = await PreOpBackupCli.RunForWriteAsync(
@@ -555,6 +559,10 @@ internal sealed class FlashXmlCommand : ICliCommand
         // The plan phase opened the session best effort; a real write needs it now.
         if (session == null) { context.Diag("error: fastboot binary not found"); return ExitCodes.NoDevice; }
         if (!session.Connected) { context.Diag("error: no device in fastboot mode"); return ExitCodes.NoDevice; }
+
+        // D-16 battery floor: measured before the pre-op backup and before the first write.
+        int? batteryRefusal = await BatteryWriteGate.CheckAsync(context, Name, session);
+        if (batteryRefusal.HasValue) return batteryRefusal.Value;
 
         PreOpBackupResult backup = await PreOpBackupCli.RunForWriteAsync(
             args, context, "flash-xml", writeList.Select(partition => partition.Identifier ?? string.Empty), session, cancellationToken);
