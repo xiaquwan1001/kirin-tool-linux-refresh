@@ -72,6 +72,9 @@ GUI、无头 CLI 与 MCP server 共用同一份实现，每一个破坏性操作
 | **双 CI + 测试单一事实源**（`tests/suites.txt`，17 套免硬件 harness，GitHub Actions 与 GitLab CI 同跑） | 只有一条流水线跑的测试，注定会烂。`FlashPolicy` 现在缺 CLI 二进制就硬失败，不再静默 SKIP。 |
 | **`StableParity` 哈希冻结面**：`loaders/`、fastboot payload、`SuperMerger`、`VcomFlasher`、USB Update | 硬件 blob 与串口协议不允许被顺手改掉；这些位置只接受行为保持型改动。 |
 | **崩溃兜底与健壮性修复**（超时杀进程树、`SerialPort` 泄漏、每实例临时文件、截断的 sparse 头直接拒绝） | 刷机中途静默消失的 GUI，比会报错的 GUI 危险得多。 |
+| **安全审计线收口（v3.0）**：读和写都有身份闸门、每条派生的命令带 `-s <SN>`、`ReadOutcome` 判定、审批 socket 两端做内核级认证、不可信包输入白名单/限域/限长、`doctor` 把华为血统与 Google platform-tools 分开（exit 6） | 不能重跑的审计只是声明，不是控制。这些落在三张面孔共用的那条代码路径上，不是一张检查表。 |
+| **失败保留自己的种类（v3.1）**：`probe-failed` / `probe-timeout` / `probe-unsupported`，不再塌缩成 `null`/`false`；「任一步成功即成功」的聚合直接删除，改成 AND 链 | 把超时渲染成「没有设备」的工具，会让人去找一根本来没问题的线。 |
+| **MCP 协商协议版本；GUI 结论显式化（v3.1）**：`initialize` 支持就回显、不支持就在结果里给 `protocolNegotiation` 回退；GUI 的写结论进会话日志；红线二次确认超时报「超时取消」，不再看起来像「被拒绝」 | 静默回退 + 把三态弹窗压成两态，正是凌晨两点会被读成设备故障的东西。 |
 
 ## 值得争论的设计取舍
 
