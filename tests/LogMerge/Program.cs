@@ -134,9 +134,13 @@ try
         Check(frameWrite.GetProperty("tool").GetString() == "vcom", "the frame keeps tool=vcom");
         Check(frameWrite.GetProperty("frame").GetProperty("frameSeq").GetInt32() == 3, "the DATA frame sequence lives in frame.frameSeq, not in the row seq");
         Check(frameWrite.GetProperty("frame").GetProperty("addr").GetString() == "0x00100000", "the frame address is structured");
+        Check(frameWrite.GetProperty("frame").GetProperty("len").GetInt32() == 1034, "the DATA frame carries its payload length");
+        Check(frameWrite.GetProperty("frame").TryGetProperty("gapMs", out _), "a second frame carries the gap since the previous one");
 
         JsonElement frameAck = events.First(e => e.TryGetProperty("step", out JsonElement s) && s.GetString() == "frame.ack");
         Check(frameAck.GetProperty("ack").GetProperty("raw").GetString() == "0xAA", "the raw ACK byte survives as 0xAA");
+        Check(frameAck.GetProperty("ack").TryGetProperty("elapsedMs", out JsonElement ackMs) && ackMs.GetDouble() >= 0,
+            "the ACK carries the write-to-ACK round trip measured at the log funnel");
         Check(events.Any(e => e.TryGetProperty("step", out JsonElement s) && s.GetString() == "frame.ack" &&
             e.GetProperty("ack").GetProperty("result").GetString() == "timeout"), "an ACK timeout is a step, not a verdict");
         Check(events.Any(e => e.TryGetProperty("phase", out JsonElement p) && p.GetString() == "prompt" &&

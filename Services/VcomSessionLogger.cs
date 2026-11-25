@@ -31,6 +31,8 @@ namespace Kirin_Tool.Services
         private readonly object _gate = new object();
         private readonly OperationSession? _session;
         private long _sequence;
+        private long _frameWriteAt;
+        private long _lastFrameAt;
         private bool _disposed;
 
         private VcomSessionLogger(string cpu, OperationSession? session)
@@ -108,6 +110,7 @@ namespace Kirin_Tool.Services
                 return;
             }
 
+            fields = AddFrameTiming(name, fields);
             long sequence = Interlocked.Increment(ref _sequence);
             string line = BuildTraceLine(name, sequence, fields);
 
@@ -117,6 +120,46 @@ namespace Kirin_Tool.Services
                 WriteStructured(name, fields);
             }
         }
+
+        /// <summary>
+        /// Adds per-frame timing measured at this single funnel, so the GUI and the CLI/MCP path
+        /// agree without touching the wire code: <c>gapMs</c> = previous frame callback to this
+        /// write completing, <c>elapsedMs</c> = this write completing to the ACK being read.
+        /// Only additive fields; the trace line format and the wire bytes stay unchanged.
+        /// </summary>
+        private (string Key, object? Value)[] AddFrameTiming(string name, (string Key, object? Value)[]? fields)
+        {
+            if (name is not ("frame.write" or "frame.ack"))
+            {
+                return fields ?? Array.Empty<(string, object?)>();
+            }
+
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var extra = new List<(string, object?)>((fields?.Length ?? 0) + 2);
+            if (fields != null)
+            {
+                extra.AddRange(fields);
+            }
+
+            if (name == "frame.write")
+            {
+                if (_lastFrameAt != 0)
+                {
+                    extra.Add(("gapMs", ElapsedMs(_lastFrameAt, now)));
+                }
+                _lastFrameAt = now;
+                _frameWriteAt = now;
+            }
+            else if (_frameWriteAt != 0)
+            {
+                extra.Add(("elapsedMs", ElapsedMs(_frameWriteAt, now)));
+            }
+
+            return extra.ToArray();
+        }
+
+        private static double ElapsedMs(long from, long to) =>
+            Math.Round((to - from) * 1000.0 / System.Diagnostics.Stopwatch.Frequency, 1);
 
         /// <summary>Progress text from the service layer (event=progress).</summary>
         public void Progress(string message) => Event("progress", ("text", message));

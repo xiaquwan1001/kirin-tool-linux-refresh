@@ -74,8 +74,8 @@ ${KIRIN_LOG_DIR:-~/.local/state/kirin-tool}/
 | `stdoutTail`/`stderrTail` | string? | `phase=result` | UTF-8 安全截断 ≤2048 字节 |
 | `ok` | bool? | `phase=result`（及 `step` 的错误行） | 结论 |
 | `verdictSource` | string? | 有 `ok` 时 | 判据：`exit-code` / `arg-validation` / `timeout` / `vcom:ack` / `unknown:no-result` … |
-| `frame` | object? | VCOM 帧 | `{type, addr, frameSeq, bytes, cumulativeBytes, expectAck}` |
-| `ack` | object? | VCOM ACK | `{type, result, raw, waitedMs, fatal}` |
+| `frame` | object? | VCOM 帧 | `{type, addr, len, frameSeq, bytes, cumulativeBytes, expectAck, gapMs*}`（`gapMs` 只从第二帧起有：上一帧回调 → 本帧写出完成） |
+| `ack` | object? | VCOM ACK | `{type, result, raw, waitedMs, fatal, elapsedMs*}`（`elapsedMs` = 本帧写出完成 → ACK 字节到手；在日志漏斗处测，**wire 字节与时序不变**） |
 | `port` / `stage` / `approval` | object? | 对应事件 | 端口、阶段、审批决定的细节 |
 
 > 行级 `seq` 是**时间线序号**；VCOM 数据帧自己的序号在 `frame.frameSeq` 里，两者不冲突。
@@ -90,8 +90,8 @@ ${KIRIN_LOG_DIR:-~/.local/state/kirin-tool}/
 | `unlock.start` | `step` | `unlock.start` | `cpu`/`stages`/`loaderDirectory` |
 | `port.open` / `port.reconnect` / `port.close` | `step` | 同名 | `port` 对象 |
 | `stage.start` / `stage.end` | `step` | 同名 | `stage` 对象 |
-| `frame.write` | `step` | `frame.write` | `frame` 对象（`type`/`addr`/`frameSeq`/`bytes`/`cumulativeBytes`/`expectAck`） |
-| `frame.ack` | `step` | `frame.ack` | `ack` 对象（`type`/`result`/`raw`/`waitedMs`/`fatal`） |
+| `frame.write` | `step` | `frame.write` | `frame` 对象（`type`/`addr`/`len`/`frameSeq`/`bytes`/`cumulativeBytes`/`expectAck`/`gapMs`） |
+| `frame.ack` | `step` | `frame.ack` | `ack` 对象（`type`/`result`/`raw`/`waitedMs`/`fatal`/`elapsedMs`） |
 | `progress` | `step` | `progress` | `notes` = 进度文本 |
 | `prompt` / `prompt.answer` | `prompt` | 同名 | `notes` = 提示原文 / `answer` |
 | `error` | `step` | `error` | `ok=false`、`verdictSource=exception:<类型>`、`notes=where: message` |
