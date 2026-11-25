@@ -69,12 +69,13 @@ GUI、无头 CLI 与 MCP server 共用同一份实现，每一个破坏性操作
 | **`flash-xml` 默认跳过 loader 未暴露的标识符**（仅警告），`--strict-names` 才拒绝（exit 3） | 人手写的 XML 可能合法地写了只在某些 loader 上成立的别名；默认硬拒没有拦住任何真实风险，只让人困惑。 |
 | **VCOM 只有一份实现，GUI 与 CLI 共用**（`vcom-unlock` 已能真上传；`oeminfo`、`downgrade-enable` 仍恒 exit 4） | loader 装载协议原来只有 GUI 路径，同一次解锁只能手点界面。现在 CLI/MCP 直接调 `FirmwareUnlocker`/`VcomFlasher`：同样的帧、同样的地址表，外加可注入的 ACK 策略与会话日志（[对齐表](docs/cli-vcom-unlock-parity.md)）。oeminfo 的 HMAC 仍无法离线重算，所以它保留"只出计划"。 |
 | **自建发布流水线**（deb / AppImage / tar.gz / 单文件 CLI 同源于一个提交），deb 依赖策略 + 三个 Ubuntu 代的 `apt-get -s` 模拟 | 上游 release 从不匹配 Linux 运行时现实：ICU soname 每个发行版都变、24.04+ 的 `libssl3` 变成 `libssl3t64`、dpkg alternatives 不支持通配。详见 [docs/fork-release.md](docs/fork-release.md)。 |
-| **双 CI + 测试单一事实源**（`tests/suites.txt`，17 套免硬件 harness，GitHub Actions 与 GitLab CI 同跑） | 只有一条流水线跑的测试，注定会烂。`FlashPolicy` 现在缺 CLI 二进制就硬失败，不再静默 SKIP。 |
+| **双 CI + 测试单一事实源**（`tests/suites.txt`，**34 套**免硬件 harness，GitHub Actions 与 GitLab CI 同跑） | 只有一条流水线跑的测试，注定会烂。`FlashPolicy` 现在缺 CLI 二进制就硬失败，不再静默 SKIP。 |
 | **`StableParity` 哈希冻结面**：`loaders/`、fastboot payload、`SuperMerger`、`VcomFlasher`、USB Update | 硬件 blob 与串口协议不允许被顺手改掉；这些位置只接受行为保持型改动。 |
 | **崩溃兜底与健壮性修复**（超时杀进程树、`SerialPort` 泄漏、每实例临时文件、截断的 sparse 头直接拒绝） | 刷机中途静默消失的 GUI，比会报错的 GUI 危险得多。 |
 | **安全审计线收口（v3.0）**：读和写都有身份闸门、每条派生的命令带 `-s <SN>`、`ReadOutcome` 判定、审批 socket 两端做内核级认证、不可信包输入白名单/限域/限长、`doctor` 把华为血统与 Google platform-tools 分开（exit 6） | 不能重跑的审计只是声明，不是控制。这些落在三张面孔共用的那条代码路径上，不是一张检查表。 |
 | **失败保留自己的种类（v3.1）**：`probe-failed` / `probe-timeout` / `probe-unsupported`，不再塌缩成 `null`/`false`；「任一步成功即成功」的聚合直接删除，改成 AND 链 | 把超时渲染成「没有设备」的工具，会让人去找一根本来没问题的线。 |
 | **MCP 协商协议版本；GUI 结论显式化（v3.1）**：`initialize` 支持就回显、不支持就在结果里给 `protocolNegotiation` 回退；GUI 的写结论进会话日志；红线二次确认超时报「超时取消」，不再看起来像「被拒绝」 | 静默回退 + 把三态弹窗压成两态，正是凌晨两点会被读成设备故障的东西。 |
+| **VCOM 帧级日志带耗时（v3.1.x）**：结构化会话日志早就有（`~/.local/state/kirin-tool/sessions/<id>/`，逐帧 `type/addr/len/seq/ACK`），现在每条再加 `gapMs`（上一帧回调到本次写完）与 `elapsedMs`（本次写完到读到 ACK） | 「卡在第 37 帧」这种描述没法定位问题：真正要看的是**哪一帧之后时间停了**。两个量都量在 `VcomSessionLogger.Event` 这个 GUI/CLI/MCP 共用的唯一漏斗里，线协议与 trace 行格式保持纯增量，`LogMerge` 对它做断言。 |
 
 ## 值得争论的设计取舍
 
@@ -141,8 +142,9 @@ MCP 需在运行中的 GUI 里带外批准）。
 **会话日志（GUI 与 CLI 同一份）：** 每次 VCOM 尝试写进本次操作的会话目录
 `~/.local/state/kirin-tool/sessions/<时间戳>-<pid>-<op>/`（可用 `KIRIN_LOG_DIR` 覆盖）：`vcom-trace.txt` 是人读转录，
 `session.jsonl` 是同一时间线上的机器读数（v2.4.15 起日志已合流，见 [docs/log-merge.md](docs/log-merge.md)）。转录含 pid、端口、framing、
-逐帧一行（type/addr/len/seq/bytes）、ACK 原始字节或超时、每阶段起止、每条拔插提示与用户选择、
-最终结论——事后可对账。GUI 在进度对话框显示路径，CLI 打到 stderr。字段表见
+逐帧一行（type/addr/len/seq/bytes/**gapMs/elapsedMs**）、ACK 原始字节或超时、每阶段起止、每条拔插提示与用户选择、
+最终结论——事后可对账。**帧耗时是 v3.1.x 新增的**：`gapMs` = 上一帧回调到本次写完，`elapsedMs` = 本次写完到读到 ACK；
+「卡在第 N 帧」这种描述由此变成「第 N 帧之后时间停在哪一侧」，串口侧还是设备侧一眼可分。GUI 在进度对话框显示路径，CLI 打到 stderr。字段表见
 [docs/cli-vcom-unlock-parity.md §7](docs/cli-vcom-unlock-parity.md)。
 
 **红线分区 / 不可逆写入** 必须由人显式覆盖，而且**不是点一下按钮就算**：

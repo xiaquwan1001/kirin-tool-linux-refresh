@@ -75,12 +75,13 @@ added or changed afterwards; the exhaustive per-release list is in
 | **`flash-xml` skips identifiers the loader does not expose** (warning), `--strict-names` refuses with exit 3 | a human-authored XML may legitimately mention aliases; failing hard by default blocked nothing useful but confused everybody. |
 | **One VCOM implementation, GUI and CLI** (`vcom-unlock` now really uploads; `oeminfo`, `downgrade-enable` stay plan-only → exit 4) | the VCOM loader protocol had no CLI path, so the same unlock could only be done by hand in the GUI. The CLI/MCP now call `FirmwareUnlocker`/`VcomFlasher` themselves — same frames, same addresses, an injectable ACK policy and a session log ([parity table](docs/cli-vcom-unlock-parity.md)). oeminfo's HMAC still cannot be recomputed offline, so that one keeps its plan. |
 | **Own release pipeline** (deb / AppImage / tar.gz / single-file CLI from one commit) with a deb `Depends` policy and `apt-get -s` simulation on three Ubuntu generations | upstream releases never matched Linux runtime reality: ICU sonames move every release, `libssl3` became `libssl3t64` on 24.04+, and dpkg alternatives have no wildcards. [docs/fork-release.md](docs/fork-release.md). |
-| **Dual CI, single source of truth for tests** (`tests/suites.txt`, 17 hardware-free harnesses, GitHub Actions + GitLab CI) | a test that only one pipeline runs is a test that will rot. `FlashPolicy` now fails hard when the CLI binary is missing instead of skipping. |
+| **Dual CI, single source of truth for tests** (`tests/suites.txt`, **34** hardware-free harnesses, GitHub Actions + GitLab CI) | a test that only one pipeline runs is a test that will rot. `FlashPolicy` now fails hard when the CLI binary is missing instead of skipping. |
 | **`StableParity` hash boundary** around `loaders/`, the fastboot payload, `SuperMerger`, `VcomFlasher`, USB Update | hardware blobs and serial protocol must not move by accident; only behaviour-preserving edits are allowed there. |
 | **Crash handlers and robustness fixes** (process-tree kill on timeout, `SerialPort` leak, per-instance temp files, truncated sparse header rejection) | a GUI that dies silently mid-flash is worse than one that reports a crash. |
 | **The security-audit line closed (v3.0)** — identity gate on reads *and* writes, `-s <SN>` on every spawned line, `ReadOutcome` verdicts, a kernel-authenticated approval socket on both ends, whitelisted/contained/bounded package input, and a `doctor` that separates Huawei lineage from Google platform-tools (exit 6) | an audit that cannot be re-run is a claim, not a control. These live in the code path all three faces share, not in a checklist. |
 | **Every failure keeps its kind (v3.1)** — `probe-failed` / `probe-timeout` / `probe-unsupported` instead of collapsing into `null`/`false`; the "any step succeeded ⇒ true" aggregate is deleted in favour of an AND chain | a tool that renders a timeout as "no device" sends you hunting for a cable that is fine. |
 | **MCP negotiates its protocol revision; GUI conclusions are explicit (v3.1)** — `initialize` echoes a supported revision or falls back with `protocolNegotiation` in the result; GUI write conclusions land in the session log; a redline re-confirm timeout reports "cancelled by timeout", never "refused" | silent fallbacks, and three-state dialogs collapsed into two, are exactly what reads as a device fault at 2 a.m. |
+| **VCOM frame logs carry timing (v3.1.x)** — the structured session log already existed (`~/.local/state/kirin-tool/sessions/<id>/`, per-frame `type/addr/len/seq/ACK`); each line now also carries `gapMs` (previous frame's callback → this write completing) and `elapsedMs` (this write completing → the ACK being read) | "it stalls at frame 37" is not a diagnosis; *which frame's timing ran away* is. Both are measured in `VcomSessionLogger.Event`, the single funnel the GUI, CLI and MCP path share, so the wire protocol and the trace line format stay purely additive — `LogMerge` asserts both. |
 
 ## Design decisions worth arguing about
 
@@ -157,8 +158,11 @@ MCP needs an out-of-band approval in the running GUI for both.
 
 **Session log (GUI and CLI share it):** every VCOM attempt writes
 `~/.local/state/kirin-tool/vcom-<UTC>-<cpu>.log` (override with `KIRIN_LOG_DIR`): pid, port, framing,
-one line per frame (type/addr/len/seq/bytes), the raw ACK byte or timeout, every stage boundary, every
-cable prompt and its answer, and the final verdict — so a failed attempt can be reconciled later. The GUI
+one line per frame (type/addr/len/seq/bytes/**gapMs/elapsedMs**), the raw ACK byte or timeout, every stage
+boundary, every cable prompt and its answer, and the final verdict — so a failed attempt can be reconciled later.
+**Frame timing is new in v3.1.x:** `gapMs` = previous frame's callback → this write completing, `elapsedMs` = this
+write completing → the ACK being read. "It stalls at frame N" becomes "which side of frame N stopped" — cable
+path or device — as soon as you look at the log. The GUI
 shows the path in the progress dialog; the CLI prints it on stderr. Field table:
 [docs/cli-vcom-unlock-parity.md §7](docs/cli-vcom-unlock-parity.md).
 
